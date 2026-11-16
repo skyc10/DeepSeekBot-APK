@@ -1,0 +1,321 @@
+// @vitest-environment jsdom
+import { act } from 'react';
+import { createRoot } from 'react-dom/client';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { ConnectPanel } from '../src/client/connect-panel.js';
+import { PairedDevicesSettings } from '../src/client/paired-devices.js';
+import { zhTranslate } from '../src/client/locale.js';
+
+vi.mock('@deepseek-ai/dsh-client-ui-primitives', () => ({
+  Button: 'button',
+  relativeTime: () => ({ unit: 'minute', n: 1 }),
+}));
+
+let host: HTMLDivElement;
+let root: ReturnType<typeof createRoot>;
+let snapshot: Record<string, unknown>;
+const posts: unknown[] = [];
+
+function devices(connect?: Record<string, unknown>) {
+  return {
+    host: { id: 'h', name: 'Studio' },
+    devices: [],
+    routes: {
+      routes: [
+        { url: 'http://127.0.0.1:4100', kind: 'loopback', ready: true },
+        ...(connect?.['state'] === 'connected'
+          ? [{ url: `https://${String(connect['hostname'])}`, kind: 'connect', ready: true }]
+          : []),
+      ],
+      tailscale: 'missing',
+      serveCommand: 'tailscale serve --bg 4100',
+    },
+    ...(connect === undefined ? {} : { connect }),
+  };
+}
+
+const render = async (section: 'devices' | 'connect' = 'connect') => {
+  await act(async () => root.unmount());
+  root = createRoot(host);
+  await act(async () => root.render(<PairedDevicesSettings t={zhTranslate} section={section} />));
+  await act(async () => new Promise((done) => setTimeout(done, 0)));
+};
+const button = (label: string) =>
+  [...host.querySelectorAll('button')].find((node) => node.textContent === label);
+
+beforeEach(() => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  posts.length = 0;
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (_url: string, init?: RequestInit) => {
+      if (init?.method === 'POST') {
+        posts.push(JSON.parse(String(init.body)));
+        return Response.json({ state: 'signing-in' });
+      }
+      return Response.json(snapshot);
+    }),
+  );
+  host = document.createElement('div');
+  document.body.append(host);
+  root = createRoot(host);
+});
+afterEach(async () => {
+  await act(async () => root.unmount());
+  host.remove();
+  vi.unstubAllGlobals();
+});
+
+it('hides the Connect section when the Host has no account support', async () => {
+  snapshot = devices();
+  await render('devices');
+  expect(host.querySelector('[data-connect]')).toBeNull();
+  expect(host.querySelector('[data-pair-route-steps]')).toBeNull();
+  await act(async () => button(zhTranslate('connections.manage'))?.click());
+  await act(async () => button(zhTranslate('devices.tailscale.setup'))?.click());
+  expect(host.querySelector('[data-pair-route-steps]')).not.toBeNull();
+});
+
+it('signs in, shows the code to confirm, then the connected address', async () => {
+  snapshot = devices({ state: 'off', account: { state: 'signed-out' } });
+  await render();
+  expect(host.querySelector('[data-connect-account]')?.getAttribute('data-connect-account')).toBe(
+    'signed-out',
+  );
+  expect(host.querySelector('[data-pair-phone]')).toBeNull();
+  await act(async () => button('登录')?.click());
+  expect(posts).toEqual([{ action: 'sign-in' }]);
+
+  snapshot = devices({
+    state: 'off',
+    account: {
+      state: 'signing-in',
+      userCode: 'KQXP-7HMD',
+      verificationUri: 'https://auth.example/device?code=KQXP-7HMD',
+    },
+  });
+  await render();
+  expect(button('登录')).toBeUndefined();
+  expect(host.querySelector('[data-connect-code]')?.textContent).toContain('KQXP-7HMD');
+  expect(host.querySelector('[data-connect-switch]')?.textContent).toBe(
+    zhTranslate('devices.connect.switchAccount'),
+  );
+  const writeText = vi.fn(async () => undefined);
+  Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+  const chip = host.querySelector<HTMLButtonElement>('[data-connect-copy]');
+  expect(chip?.getAttribute('aria-label')).toBe(zhTranslate('devices.connect.copyLink'));
+  expect(chip?.textContent).toContain('https://auth.example/device?code=KQXP-7HMD');
+  await act(async () => chip?.click());
+  expect(writeText).toHaveBeenCalledWith('https://auth.example/device?code=KQXP-7HMD');
+  expect(chip?.getAttribute('data-connect-copy')).toBe('copied');
+  expect(chip?.textContent).toContain(zhTranslate('devices.connect.copied'));
+  const open = vi.spyOn(window, 'open').mockReturnValue(null);
+  await act(async () => button('打开登录页')?.click());
+  expect(open).toHaveBeenCalledWith(
+    'https://auth.example/device?code=KQXP-7HMD',
+    '_blank',
+    'noopener',
+  );
+
+  snapshot = devices({
+    state: 'connected',
+    hostname: 'hk7q2mstudio3.deepseekbot.dev',
+    account: { state: 'signed-in', email: 'vain@example.com' },
+  });
+  await render();
+  expect(host.querySelector('[data-connect-email]')).toBeNull();
+  expect(host.textContent).not.toContain('hk7q2mstudio3.deepseekbot.dev');
+  await act(async () => host.querySelector<HTMLButtonElement>('[data-connect-manage]')?.click());
+  expect(host.querySelector('[data-connect-email]')?.textContent).toBe('vain@example.com');
+  expect(host.textContent).toContain('不是你？');
+  expect(host.querySelector('[data-connect-address]')?.textContent).toContain(
+    'hk7q2mstudio3.deepseekbot.dev',
+  );
+  expect(host.querySelector('[data-connect-tunnel]')?.getAttribute('data-connect-tunnel')).toBe(
+    'connected',
+  );
+  expect(host.querySelector('[data-pair-route-steps]')).toBeNull();
+  await act(async () => button('退出登录')?.click());
+  expect(posts.at(-1)).toEqual({ action: 'sign-out' });
+});
+
+it('explains a refused account', async () => {
+  snapshot = devices({ state: 'off', account: { state: 'error', issue: 'account-not-allowed' } });
+  await render();
+  expect(host.querySelector('[data-connect-issue]')?.textContent).toBe(
+    zhTranslate('devices.connect.notAllowed'),
+  );
+  expect(button('登录')).toBeDefined();
+});
+
+it('opens the linked computers when the account reaches its computer limit', async () => {
+  snapshot = devices({
+    state: 'off',
+    account: { state: 'error', issue: 'host-limit', email: 'qa@example.com' },
+  });
+  await render();
+  expect(host.querySelector('[data-connect-issue]')?.textContent).toBe(
+    '账号关联电脑数量已达上限，请在下方管理已关联的电脑。',
+  );
+  expect(host.querySelector('[data-connect-manage]')?.getAttribute('aria-expanded')).toBe('true');
+  expect(host.querySelector('[data-connect-email]')?.textContent).toBe('qa@example.com');
+});
+
+it.each(['sign-in', undefined] as const)(
+  'does not promise automatic recovery without Host confirmation (%s)',
+  async (recovery) => {
+    snapshot = devices({
+      state: 'off',
+      account: { state: 'error', issue: 'relay-unavailable', recovery },
+    });
+    await render();
+    expect(host.querySelector('[data-connect-issue]')?.textContent).toBe(
+      '暂时连不上 Tobs 服务，稍后重新登录。',
+    );
+    expect(host.textContent).not.toContain('自动重试');
+    expect(button('登录')).toBeDefined();
+  },
+);
+
+it('describes unavailable local credentials without blaming the Tobs service', async () => {
+  snapshot = devices({
+    state: 'off',
+    account: { state: 'error', issue: 'credential-unavailable' },
+  });
+  await render();
+  expect(host.querySelector('[data-connect-issue]')?.textContent).toBe(
+    '无法读取本机登录凭证，请检查凭证存储后重新登录。',
+  );
+  expect(host.textContent).not.toContain('连不上 Tobs 服务');
+});
+
+it('explains automatic recovery only when the Host can resume the saved session', async () => {
+  snapshot = devices({
+    state: 'off',
+    account: { state: 'error', issue: 'relay-unavailable', recovery: 'automatic' },
+  });
+  await render();
+  expect(host.querySelector('[data-connect-issue]')?.textContent).toBe(
+    zhTranslate('devices.connect.relayDown'),
+  );
+});
+
+it('tells a waiting computer its place in line, the pool and what frees a tunnel', async () => {
+  snapshot = devices({
+    state: 'off',
+    account: {
+      state: 'error',
+      issue: 'relay-full',
+      recovery: 'automatic',
+      email: 'vain@example.com',
+      wait: { reason: 'pool-full', position: 2, since: '2026-11-09T08:00:00.000Z' },
+      pool: {
+        capacity: 1000,
+        inUse: 1000,
+        free: 0,
+        waiting: 3,
+        nextFreeAt: '2026-11-09T08:30:00.000Z',
+        guaranteedMinutes: 30,
+      },
+    },
+  });
+  await render();
+  expect(host.querySelector('[data-connect-eta]')?.textContent).toContain('最早');
+  expect(host.textContent).toContain(zhTranslate('devices.connect.poolRule', { minutes: 30 }));
+  const wait = host.querySelector('[data-connect-wait="pool-full"]');
+  expect(wait?.textContent).toContain(zhTranslate('devices.connect.full.queued', { position: 2 }));
+  expect(wait?.textContent).toContain('开始等待');
+  expect(host.querySelector('[data-connect-pool]')?.textContent).toBe(
+    zhTranslate('devices.connect.pool', { capacity: 1000, inUse: 1000, free: 0, waiting: 3 }),
+  );
+  expect(host.querySelector('[data-connect-protected]')).toBeNull();
+  expect(host.querySelector('[data-connect-email]')).toBeNull();
+  await act(async () => host.querySelector<HTMLButtonElement>('[data-connect-manage]')?.click());
+  expect(host.querySelector('[data-connect-email]')?.textContent).toBe('vain@example.com');
+  expect(button(zhTranslate('devices.connect.signIn'))).toBeUndefined();
+  expect(host.querySelector('[data-connect-issue]')).toBeNull();
+});
+
+it('shows shared tunnel usage once connected', async () => {
+  snapshot = devices({
+    state: 'connected',
+    hostname: 'habcdefghijkl.deepseekbot.dev',
+    account: {
+      state: 'signed-in',
+      email: 'vain@example.com',
+      pool: { capacity: 1000, inUse: 412, free: 588, waiting: 0 },
+    },
+  });
+  await render();
+  expect(host.querySelector('[data-connect-pool]')?.textContent).toBe(
+    zhTranslate('devices.connect.pool', { capacity: 1000, inUse: 412, free: 588, waiting: 0 }),
+  );
+  expect(host.textContent).not.toContain(zhTranslate('devices.connect.poolRule', { minutes: 30 }));
+  expect(host.querySelector('[data-connect-protected]')).toBeNull();
+});
+
+it('warns a connected computer how long its tunnel is kept while others wait', async () => {
+  snapshot = devices({
+    state: 'connected',
+    hostname: 'habcdefghijkl.deepseekbot.dev',
+    account: {
+      state: 'signed-in',
+      email: 'vain@example.com',
+      protectedUntil: '2026-11-09T09:00:00.000Z',
+      pool: { capacity: 1000, inUse: 1000, free: 0, waiting: 2, guaranteedMinutes: 30 },
+    },
+  });
+  await render();
+  expect(host.querySelector('[data-connect-protected]')?.textContent).toContain('至少保留到');
+  expect(host.textContent).toContain(zhTranslate('devices.connect.poolRule', { minutes: 30 }));
+});
+
+it('marks a device paired in the last day so a stranger stands out', async () => {
+  const recent = new Date(Date.now() - 60_000).toISOString();
+  const old = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString();
+  snapshot = {
+    ...devices(),
+    devices: [
+      { id: 'new', name: 'Stranger', pairedAt: recent },
+      { id: 'old', name: 'Phone', pairedAt: old, lastSeenAt: old },
+    ],
+  };
+  await render();
+  await render('devices');
+  const row = (id: string) => host.querySelector(`[data-paired-device="${id}"]`);
+  expect(row('new')?.hasAttribute('data-new-device')).toBe(true);
+  expect(row('new')?.textContent).toContain('新配对，不是你的设备请移除');
+  expect(row('old')?.hasAttribute('data-new-device')).toBe(false);
+});
+
+it('opens management when a mounted sign-in flow reaches the account limit without another sign-in', async () => {
+  snapshot = { hosts: [] };
+  const onAccount = vi.fn();
+  const reloadSnapshot = vi.fn(async () => undefined);
+  const show = async (limited: boolean) =>
+    act(async () =>
+      root.render(
+        <ConnectPanel
+          t={zhTranslate}
+          account={
+            limited
+              ? { state: 'error', issue: 'host-limit', email: 'qa@example.com' }
+              : { state: 'signed-out' }
+          }
+          tunnel={{ state: 'off' }}
+          fresh
+          busy={undefined}
+          onAccount={onAccount}
+          reloadSnapshot={reloadSnapshot}
+        />,
+      ),
+    );
+  await show(false);
+  expect(button('登录')).toBeDefined();
+  await show(true);
+  expect(host.querySelector('[data-connect-manage]')?.getAttribute('aria-expanded')).toBe('true');
+  expect(button('登录')).toBeUndefined();
+  await act(async () => host.querySelector<HTMLButtonElement>('[data-connect-manage]')!.click());
+  expect(host.querySelector('[data-connect-manage]')?.getAttribute('aria-expanded')).toBe('false');
+  expect(onAccount).not.toHaveBeenCalled();
+});

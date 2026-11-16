@@ -1,0 +1,999 @@
+import { OWNER_HUMAN_CONTEXT } from '../humans/context.js';
+import { createHash, randomUUID } from 'node:crypto';
+import { dmChannelId } from '../channels/channel.js';
+import type { ChannelStore } from '../channels/store.js';
+import type { OperationalDatabaseModulePort } from '../database/owner.js';
+import type {
+  ChannelToolApproval,
+  ToolApprovalActor,
+  ToolApprovalNotice,
+} from '../workspaces/tool-approval.js';
+import type { BotPairing, PairingRequest } from './pairing.js';
+import { boundedMessagingDelivery } from './bounded-delivery.js';
+import { assertMessagingIdentity, type MessagingIdentity } from './identity.js';
+import {
+  MessagingError,
+  MessagingProviderError,
+  type MessagingProvider,
+  type MessagingReceipt,
+  type MessagingApprovalAction,
+  type MessagingApprovalRuleAction,
+  type MessagingApprovalAck,
+  type MessagingApprovalCard,
+} from './provider.js';
+
+export interface ApprovalRoute {
+  botSlug: string;
+  pairingId: string;
+  pairingRevision: number;
+  bindingId: string;
+  revision: number;
+}
+export interface ApprovalDelivery {
+  id: string;
+  botSlug: string;
+  channelId?: string;
+  requestMessageId?: string;
+  sessionId?: string;
+  callId?: string;
+  operationHash?: string;
+  route: ApprovalRoute;
+  createdAt: string;
+  expiresAt?: string;
+  delivery: 'pending' | 'sending' | 'sent' | 'failed' | 'unknown-outcome';
+  attempts: number;
+  receipt?: MessagingReceipt;
+  reason?: string;
+  status: MessagingApprovalCard['status'];
+  update: 'none' | 'sending' | 'updated' | 'failed' | 'unknown-outcome';
+  resultSeq?: number;
+  actor?: ToolApprovalActor;
+  ruleConfirmation?: {
+    id: string;
+    kind: 'exact' | 'all-opaque';
+    actorId: string;
+    scopeKey: string;
+    presented: boolean;
+  };
+  savedRuleKind?: 'exact' | 'all-opaque' | 'secret-cli';
+  savedRuleId?: string;
+}
+export interface ApprovalMessagingSnapshot {
+  route?: ApprovalRoute;
+  routeRevision: number;
+  destinations: {
+    pairingId: string;
+    name: string;
+    reference: string;
+    accountName: string;
+    ready: boolean;
+  }[];
+  deliveries: (ApprovalDelivery & { savedRuleStatus?: 'active' | 'revoked' | 'unavailable' })[];
+}
+export interface ApprovalMessaging {
+  managementDestination(botSlug: string): {
+    route: ApprovalRoute;
+    identity: MessagingIdentity;
+    paired: PairingRequest;
+    provider: MessagingProvider;
+  };
+  attach(owner: ChannelToolApproval, channels: ChannelStore): () => void;
+  snapshot(botSlug: string): ApprovalMessagingSnapshot;
+  setRoute(botSlug: string, pairingId: string | undefined, expectedRevision: number): Promise<void>;
+  test(botSlug: string): Promise<ApprovalDelivery>;
+  retry(botSlug: string, id: string): Promise<ApprovalDelivery>;
+  refreshRules(botSlug: string): void;
+  action(
+    providerId: string,
+    event: MessagingApprovalAction | MessagingApprovalRuleAction,
+    signal: AbortSignal,
+  ): Promise<MessagingApprovalAck>;
+  result(sessionId: string, event: { type: string; seq?: number; data: unknown }): void;
+  close(): void;
+}
+
+const operationHash = (notice: ToolApprovalNotice) =>
+  createHash('sha256')
+    .update(
+      JSON.stringify([
+        notice.botSlug,
+        notice.sessionId,
+        notice.callId,
+        notice.toolName,
+        notice.role,
+        notice.cwd,
+        notice.input,
+      ]),
+    )
+    .digest('hex');
+const MAX_ATTEMPTS = 3;
+
+export function createApprovalMessaging(options: {
+  database: OperationalDatabaseModulePort;
+  pairing: BotPairing;
+  provider(id: string): MessagingProvider;
+  isBotActive(slug: string): boolean;
+  recover?: boolean;
+  warn?(message: string): void;
+}): ApprovalMessaging {
+  const { database, pairing } = options;
+  let owner: ChannelToolApproval | undefined;
+  let channels: ChannelStore | undefined;
+  let closed = false;
+  let detach: (() => void) | undefined;
+  const controller = new AbortController();
+  const busy = new Set<string>();
+  const resultText = new Map<string, string>();
+  const timers = new Map<string, ReturnType<typeof setTimeout>>();
+  const write = (value: ApprovalDelivery) => {
+    if (closed) return;
+    database.transaction(
+      (db) => {
+        db.prepare(
+          'INSERT INTO messaging_approval_deliveries(id, bot_slug, body) VALUES(?, ?, ?) ON CONFLICT(id) DO UPDATE SET body = excluded.body',
+        ).run(value.id, value.botSlug, JSON.stringify(value));
+      },
+      ['approval-messaging'],
+    );
+  };
+  const read = (id: string): ApprovalDelivery | undefined =>
+    closed
+      ? undefined
+      : database.read((db) => {
+          const row = db
+            .prepare('SELECT body FROM messaging_approval_deliveries WHERE id = ?')
+            .get(id) as { body: string } | undefined;
+          return row ? (JSON.parse(row.body) as ApprovalDelivery) : undefined;
+        });
+  const route = (slug: string): ApprovalRoute | undefined =>
+    database.read((db) => {
+      const row = db
+        .prepare('SELECT body FROM messaging_approval_routes WHERE bot_slug = ?')
+        .get(slug) as { body: string } | undefined;
+      return row?.body ? (JSON.parse(row.body) as ApprovalRoute) : undefined;
+    });
+  const routeRevision = (slug: string): number =>
+    database.read(
+      (db) =>
+        (
+          db
+            .prepare('SELECT revision FROM messaging_approval_routes WHERE bot_slug = ?')
+            .get(slug) as { revision: number } | undefined
+        )?.revision ?? 0,
+    );
+  const resolve = (
+    value: ApprovalRoute,
+  ): { identity: MessagingIdentity; paired: PairingRequest; provider: MessagingProvider } => {
+    if (closed || !options.isBotActive(value.botSlug)) throw new MessagingError('bot-unavailable');
+    const identity = database.read((db) => assertMessagingIdentity(db, value.bindingId));
+    if (identity.botSlug !== value.botSlug || identity.platform !== 'feishu')
+      throw new MessagingError('approval-route-unavailable');
+    const paired = pairing.list(value.botSlug).find((p) => p.id === value.pairingId);
+    if (
+      !paired ||
+      paired.bindingId !== identity.id ||
+      paired.revision !== value.pairingRevision ||
+      paired.status !== 'approved' ||
+      (paired.purpose === 'conversation' && paired.conversationKind !== 'dm') ||
+      !paired.capabilities.some((c) => c === 'approve' || c === 'reject' || c === 'answer')
+    )
+      throw new MessagingError('approval-route-unavailable');
+    const provider = options.provider(identity.providerId);
+    if (!provider.approvalCard) throw new MessagingError('capability-unavailable');
+    return { identity, paired, provider };
+  };
+  const canonical = (value: ApprovalDelivery): ToolApprovalNotice | undefined => {
+    if (!value.requestMessageId || !value.sessionId || !value.callId || !value.expiresAt) return;
+    const channelId = value.channelId ?? dmChannelId(value.botSlug);
+    const request = channels?.message(channelId, value.requestMessageId)?.toolApprovalRequest;
+    if (!request) return;
+    const notice = {
+      ...request,
+      botSlug: value.botSlug,
+      channelId,
+      messageId: value.requestMessageId,
+      expiresAt: value.expiresAt,
+    };
+    return notice.sessionId === value.sessionId &&
+      notice.callId === value.callId &&
+      operationHash(notice) === value.operationHash
+      ? notice
+      : undefined;
+  };
+  const requestLive = (value: ApprovalDelivery) => {
+    if (!value.requestMessageId) return value.status === 'test';
+    const pending = owner?.pending(value.botSlug, value.requestMessageId);
+    return pending !== undefined && operationHash(pending) === value.operationHash;
+  };
+  const render = (value: ApprovalDelivery): MessagingApprovalCard => {
+    const notice = canonical(value);
+    const ruleScope =
+      value.ruleConfirmation?.scopeKey ??
+      (value.savedRuleId
+        ? owner?.rule(value.botSlug, value.savedRuleId)?.scopeKey
+        : owner?.ruleScope(value.botSlug, value.requestMessageId ?? '')?.scopeKey);
+    const labels: Record<MessagingApprovalCard['status'], string> = {
+      'web-required':
+        'Native session authorization; review in Web / 此请求授予原生会话权限，请在 Web 审核',
+      pending: 'Awaiting an authorized decision / 等待授权用户处理',
+      'allowed-once': 'Decision accepted; execution not yet confirmed / 已批准一次，执行结果待确认',
+      rejected: 'Rejected; approval does not permit execution / 已拒绝，不允许执行',
+      expired:
+        'Expired or owner unavailable; use a new request / 已过期或执行者不可用，请使用新请求',
+      executed: 'Native execution result recorded / 已记录原生执行结果',
+      'execution-failed': 'Native execution failed / 原生执行失败',
+      'execution-unknown': 'Execution not confirmed; inspect Web / 执行结果未确认，请查看 Web',
+      test: 'Management route test; no operation or approval / 管理通知测试，不包含操作或授权',
+    };
+    const fullDetail = [
+      labels[value.status],
+      ...(value.savedRuleId
+        ? [
+            savedRuleStatus(value) === 'active'
+              ? value.savedRuleKind === 'secret-cli'
+                ? 'Always-allow rule saved for this program, account and variable names; current creator authority is checked before every future call / 已保存“总是允许此类”规则（同一程序、账号和变量名）；每次调用前检查创建人的当前权限'
+                : value.savedRuleKind === 'all-opaque'
+                  ? 'All-opaque rule saved for this scope; current creator authority is checked before every future call / 已保存此范围内全部不透明工具规则；每次调用前检查创建人的当前权限'
+                  : 'Exact matching rule saved; current creator authority is checked before every future call / 已保存精确匹配规则；每次调用前检查创建人的当前权限'
+              : 'Saved rule disabled or unavailable; inspect Web and create a new confirmed rule to allow future calls / 已保存的规则已停用或不可用；请查看 Web，需重新确认创建规则才能批准后续调用',
+          ]
+        : []),
+      ...(value.status === 'pending' && value.ruleConfirmation
+        ? [
+            notice?.toolName === 'secret_cli'
+              ? 'Confirm always allowing this kind AND this call. Any later call with the same program, account and environment variable names runs without asking, with any arguments, including one that prints the secret. Limited to this Bot, execution role and current Workspace Grant scope. Creator authority loss permanently disables the rule. / 确认“总是允许此类”并批准本次调用。之后同一程序、同一账号、同一组环境变量名的调用不再询问，参数不限，包括会打印密钥的参数。仅限当前 Bot、执行角色及 Workspace Grant 范围；创建人权限失效会永久停用规则。'
+              : value.ruleConfirmation.kind === 'all-opaque'
+                ? 'HIGH RISK: Confirm saving a rule for ALL opaque tools and ALL inputs in the displayed scope AND allowing this call. Future commands need not match this example and may access files outside authorized folders or the network. Limited to this Bot, execution role, directory and current Grant IDs/write revisions. Native/Workspace/Service authority is not expanded. Creator authority loss permanently disables this rule. / 高风险：确认保存所示范围内全部不透明工具、全部参数的规则，并批准本次调用。后续命令无需匹配当前示例，可能访问授权文件夹之外的文件或网络。仅限当前 Bot、执行角色、目录及 Grant ID／写入版本；不扩大原生、工作区或 Service 授权。创建人权限失效会永久停用规则。'
+                : 'Confirm saving an exact rule AND allowing this call. Only the same complete tool name/input, this Bot execution role and current Workspace Grant scope match. Native/Workspace/Service authority is not expanded. Creator authority loss permanently disables the rule. / 确认保存精确规则并批准本次调用。仅匹配完整工具名与参数、当前 Bot 执行角色及 Workspace Grant 范围；不扩大原生、工作区或 Service 授权。创建人权限失效会停用规则。',
+          ]
+        : []),
+      ...(resultText.has(value.id) ? [resultText.get(value.id)!] : []),
+      ...(notice ? [notice.toolName, notice.role, notice.cwd, notice.input] : []),
+      ...(ruleScope
+        ? [
+            `Rule scope (execution role, directory, Grant IDs/write revisions) / 规则范围（执行角色、目录、Grant ID／写入版本）:\n${ruleScope}`,
+          ]
+        : []),
+    ].join('\n');
+    const detail =
+      fullDetail.length <= 16000
+        ? fullDetail
+        : fullDetail.slice(0, 15880) +
+          '\nContent truncated; inspect the complete operation in Web before deciding / 内容已截断，决定前请在 Web 查看完整操作';
+    return {
+      requestId: value.id,
+      title: notice ? 'Tool approval / 工具审批' : 'Management notification / 管理通知',
+      detail,
+      status: value.status,
+      ...(value.status === 'pending' && value.ruleConfirmation
+        ? { ruleConfirmation: { id: value.ruleConfirmation.id, kind: value.ruleConfirmation.kind } }
+        : value.status === 'pending' &&
+            fullDetail.length <= 15000 &&
+            ruleAllowed(value) &&
+            owner?.ruleScope(value.botSlug, value.requestMessageId!)
+          ? {
+              rules:
+                notice?.toolName !== 'secret_cli' &&
+                owner?.ruleScope(value.botSlug, value.requestMessageId!)?.allOpaque !== false &&
+                ruleAllowed(value, 'all-opaque')
+                  ? (['exact', 'all-opaque'] as ['exact', 'all-opaque'])
+                  : (['exact'] as ['exact']),
+            }
+          : {}),
+    };
+  };
+  const ruleAllowed = (
+    value: ApprovalDelivery,
+    kind: 'exact' | 'all-opaque' = 'exact',
+  ): boolean => {
+    try {
+      const context = resolve(value.route);
+      if (context.provider.approvalRuleCardSupported !== true) return false;
+      if (
+        kind === 'all-opaque' &&
+        context.provider.approvalRuleAllOpaqueCardSupported?.(
+          context.identity.accountRef,
+          context.identity.fingerprint,
+        ) !== true
+      )
+        return false;
+      pairing.assert(
+        value.botSlug,
+        context.identity.id,
+        context.paired.actorId,
+        'approve',
+        value.route.pairingId,
+      );
+      pairing.assert(
+        value.botSlug,
+        context.identity.id,
+        context.paired.actorId,
+        'save-rules',
+        value.route.pairingId,
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const savedRuleStatus = (value: ApprovalDelivery): 'active' | 'revoked' | 'unavailable' => {
+    const saved = value.savedRuleId ? owner?.rule(value.botSlug, value.savedRuleId) : undefined;
+    return saved ? (saved.revokedAt ? 'revoked' : 'active') : 'unavailable';
+  };
+  const safe = (value: ApprovalDelivery): boolean => {
+    try {
+      const selected = route(value.botSlug);
+      if (
+        !selected ||
+        selected.revision !== value.route.revision ||
+        selected.pairingId !== value.route.pairingId
+      )
+        return false;
+      resolve(value.route);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const cleanupContext = (value: ApprovalDelivery) => {
+    const saved = value.savedRuleId ? owner?.rule(value.botSlug, value.savedRuleId) : undefined;
+    if (!value.receipt || !saved?.revokedAt) return;
+    try {
+      const identity = database.read((db) => assertMessagingIdentity(db, value.route.bindingId));
+      if (
+        identity.botSlug !== value.botSlug ||
+        identity.platform !== 'feishu' ||
+        saved.externalCreator?.fingerprint !== identity.fingerprint ||
+        saved.externalCreator.bindingId !== identity.id
+      )
+        return;
+      const provider = options.provider(identity.providerId);
+      if (!provider.approvalCard) return;
+      return { identity, provider };
+    } catch {
+      return;
+    }
+  };
+  const bounded = <T>(run: (signal: AbortSignal) => Promise<T>): Promise<T> =>
+    boundedMessagingDelivery(controller.signal, run);
+  const trace = (
+    initiator: string,
+    phase: string,
+    outcome: string,
+    durationMs: number,
+    reason = 'none',
+    attempt = 0,
+  ) =>
+    options.warn?.(
+      `approval-notification ${JSON.stringify({ initiator, phase, outcome, durationMs: Math.round(durationMs), reason, attempt })}`,
+    );
+  const update = async (id: string): Promise<void> => {
+    if (busy.has(id) || closed) return;
+    const startedAt = performance.now();
+    const value = read(id);
+    if (!value?.receipt) return;
+    const cleanup = cleanupContext(value);
+    if (!safe(value) && !cleanup) return;
+    busy.add(id);
+    let updateReason = 'none';
+    try {
+      const currentStatus = value.status;
+      const confirmationId = value.ruleConfirmation?.id;
+      const savedRuleId = value.savedRuleId;
+      const revokedAt = savedRuleId
+        ? owner?.rule(value.botSlug, savedRuleId)?.revokedAt
+        : undefined;
+      const context = cleanup ?? resolve(value.route);
+      write({ ...value, update: 'sending' });
+      await bounded((signal) =>
+        context.provider.approvalCard!({
+          accountRef: context.identity.accountRef,
+          fingerprint: context.identity.fingerprint,
+          route: value.receipt!,
+          card: cleanup
+            ? {
+                requestId: value.id,
+                title: 'Approval rule disabled / 审批规则已停用',
+                detail:
+                  'The saved rule is disabled and cannot approve future calls. Current pairing authority must be granted again and a new rule explicitly confirmed. / 已保存的规则已停用，不能批准后续调用。需重新授予当前配对权限并显式确认创建新规则。',
+                status: 'expired',
+              }
+            : render(value),
+          signal,
+          update: true,
+          beforeSend: () =>
+            (cleanup ? cleanupContext(value) !== undefined : safe(value)) &&
+            read(id)?.status === currentStatus &&
+            read(id)?.ruleConfirmation?.id === confirmationId &&
+            read(id)?.savedRuleId === savedRuleId &&
+            (savedRuleId ? owner?.rule(value.botSlug, savedRuleId)?.revokedAt : undefined) ===
+              revokedAt,
+        }),
+      );
+      const latest = read(id);
+      if (latest)
+        write({
+          ...latest,
+          update: 'updated',
+          ...(latest.ruleConfirmation?.id === confirmationId && latest.ruleConfirmation
+            ? { ruleConfirmation: { ...latest.ruleConfirmation, presented: true } }
+            : {}),
+        });
+      trace('native-settlement', 'update', 'updated', performance.now() - startedAt);
+    } catch (error) {
+      updateReason =
+        (error instanceof MessagingError || error instanceof MessagingProviderError) &&
+        /^[a-z0-9-]{1,80}$/.test(error.code)
+          ? error.code
+          : 'provider-update-failed';
+      const latest = read(id);
+      if (latest)
+        write({
+          ...latest,
+          update:
+            error instanceof MessagingProviderError && error.disposition === 'not-started'
+              ? 'failed'
+              : 'unknown-outcome',
+        });
+    } finally {
+      trace(
+        'native-settlement',
+        'update-finish',
+        read(id)?.update ?? 'disposed',
+        performance.now() - startedAt,
+        updateReason,
+      );
+      busy.delete(id);
+      const latest = read(id);
+      if (
+        latest &&
+        (latest.status !== value.status ||
+          latest.ruleConfirmation?.id !== value.ruleConfirmation?.id ||
+          latest.savedRuleId !== value.savedRuleId ||
+          (latest.savedRuleId &&
+            owner?.rule(latest.botSlug, latest.savedRuleId)?.revokedAt &&
+            !cleanup))
+      )
+        void update(id);
+    }
+  };
+  const send = async (id: string): Promise<ApprovalDelivery> => {
+    const startedAt = performance.now();
+    const value = read(id);
+    if (!value) throw new MessagingError('approval-delivery-unavailable');
+    if (
+      busy.has(id) ||
+      !['pending', 'failed'].includes(value.delivery) ||
+      value.attempts >= MAX_ATTEMPTS
+    )
+      return value;
+    busy.add(id);
+    write({ ...value, attempts: value.attempts + 1 });
+    let started = false;
+    try {
+      const context = resolve(value.route);
+      if (!safe(value) || !requestLive(value))
+        throw new MessagingProviderError('request-expired', 'not-started');
+      const messageId = context.paired.messageIds?.[0];
+      if (!messageId) throw new MessagingProviderError('source-unavailable', 'not-started');
+      write({ ...value, delivery: 'sending', attempts: value.attempts + 1 });
+      started = true;
+      const result = await bounded((signal) =>
+        context.provider.approvalCard!({
+          accountRef: context.identity.accountRef,
+          fingerprint: context.identity.fingerprint,
+          route: {
+            messageId,
+            conversationId: context.paired.conversationId,
+            actorId: context.paired.actorId,
+          },
+          card: render(value),
+          signal,
+          beforeSend: () => safe(value) && requestLive(value),
+        }),
+      );
+      if (!result.receipt) throw new MessagingProviderError('provider-result-unknown', 'unknown');
+      const latest = read(id);
+      if (!latest) return value;
+      write({ ...latest, delivery: 'sent', receipt: result.receipt });
+    } catch (error) {
+      const latest = read(id)!;
+      const definite =
+        !started ||
+        (error instanceof MessagingProviderError && error.disposition === 'not-started');
+      write({
+        ...latest,
+        delivery: definite ? 'failed' : 'unknown-outcome',
+        reason:
+          error instanceof MessagingError || error instanceof MessagingProviderError
+            ? error.code
+            : 'provider-result-unknown',
+      });
+      if (
+        definite &&
+        started &&
+        safe(value) &&
+        requestLive(value) &&
+        latest.attempts < MAX_ATTEMPTS
+      ) {
+        const timer = setTimeout(() => {
+          timers.delete(id);
+          void send(id).catch(() => options.warn?.('approval-notification-retry-failed'));
+        }, latest.attempts * 1000);
+        timer.unref();
+        timers.set(id, timer);
+        trace(
+          'native-approval',
+          'retry-scheduled',
+          'waiting',
+          performance.now() - startedAt,
+          latest.reason ?? 'known-unsent',
+          latest.attempts,
+        );
+      }
+    } finally {
+      const result = read(id);
+      trace(
+        value.status === 'test' ? 'authenticated-web' : 'native-approval',
+        'send-finish',
+        result?.delivery ?? 'disposed',
+        performance.now() - startedAt,
+        result?.reason ?? 'none',
+        result?.attempts ?? 0,
+      );
+      busy.delete(id);
+    }
+    const latest = read(id) ?? value;
+    if (latest.receipt && latest.status !== value.status) void update(id);
+    return latest;
+  };
+  const notify = (notice: ToolApprovalNotice, status: 'pending' | string) => {
+    if (closed) return;
+    if (status === 'pending') {
+      if (read(notice.messageId)) return;
+      const selected = route(notice.botSlug);
+      if (
+        selected &&
+        !pairing
+          .list(notice.botSlug)
+          .find((value) => value.id === selected.pairingId)
+          ?.capabilities.some((c) => c === 'approve' || c === 'reject')
+      )
+        return;
+      if (!selected) return;
+      write({
+        id: notice.messageId,
+        botSlug: notice.botSlug,
+        channelId: notice.channelId,
+        requestMessageId: notice.messageId,
+        sessionId: notice.sessionId,
+        callId: notice.callId,
+        operationHash: operationHash(notice),
+        route: selected,
+        createdAt: new Date().toISOString(),
+        expiresAt: notice.expiresAt,
+        delivery: 'pending',
+        attempts: 0,
+        status:
+          notice.externalDecision === 'web-only' || notice.externalDecision === 'each-use'
+            ? 'web-required'
+            : 'pending',
+        update: 'none',
+      });
+      queueMicrotask(
+        () =>
+          void send(notice.messageId).catch(() =>
+            options.warn?.('approval-notification-send-failed'),
+          ),
+      );
+    } else {
+      const value = read(notice.messageId);
+      if (!value) return;
+      write({
+        ...value,
+        status:
+          status === 'allowed-once'
+            ? 'allowed-once'
+            : status === 'rejected'
+              ? 'rejected'
+              : 'expired',
+      });
+      queueMicrotask(() => void update(value.id));
+    }
+  };
+  if (options.recover !== false)
+    database.transaction((db) => {
+      db.prepare(
+        "UPDATE messaging_approval_deliveries SET body = json_set(body, '$.delivery', CASE WHEN json_extract(body, '$.delivery') = 'sending' THEN 'unknown-outcome' ELSE json_extract(body, '$.delivery') END, '$.status', CASE WHEN json_extract(body, '$.status') IN ('pending', 'web-required') THEN 'expired' WHEN json_extract(body, '$.status') = 'allowed-once' THEN 'execution-unknown' ELSE json_extract(body, '$.status') END, '$.update', CASE WHEN json_extract(body, '$.update') = 'sending' THEN 'unknown-outcome' ELSE json_extract(body, '$.update') END)",
+      ).run();
+    });
+  const service: ApprovalMessaging = {
+    managementDestination(botSlug) {
+      const selected = route(botSlug);
+      if (!selected) throw new MessagingError('approval-route-unavailable');
+      return { route: selected, ...resolve(selected) };
+    },
+    attach(nextOwner, nextChannels) {
+      detach?.();
+      owner = nextOwner;
+      channels = nextChannels;
+      const unsubscribe = nextOwner.subscribe(notify);
+      detach = unsubscribe;
+      return () => {
+        unsubscribe();
+        if (detach === unsubscribe) {
+          owner = undefined;
+          channels = undefined;
+          detach = undefined;
+        }
+      };
+    },
+    snapshot(botSlug) {
+      const selected = route(botSlug);
+      const destinations = pairing
+        .list(botSlug)
+        .filter(
+          (p) =>
+            p.status === 'approved' &&
+            p.capabilities.some((c) => c === 'approve' || c === 'reject' || c === 'answer'),
+        )
+        .map((p) => {
+          let ready = false;
+          try {
+            resolve({
+              botSlug,
+              pairingId: p.id,
+              pairingRevision: p.revision,
+              bindingId: p.bindingId,
+              revision: selected?.revision ?? 0,
+            });
+            ready = true;
+          } catch {}
+          return {
+            pairingId: p.id,
+            name: p.actorName ?? 'Name unavailable / 名称不可用',
+            reference: p.reference,
+            accountName: p.accountName,
+            ready,
+          };
+        });
+      const deliveries = database.read((db) =>
+        (
+          db
+            .prepare(
+              'SELECT body FROM messaging_approval_deliveries WHERE bot_slug = ? ORDER BY rowid DESC LIMIT 20',
+            )
+            .all(botSlug) as { body: string }[]
+        ).map((row) => JSON.parse(row.body) as ApprovalDelivery),
+      );
+      return {
+        ...(selected ? { route: selected } : {}),
+        routeRevision: routeRevision(botSlug),
+        destinations,
+        deliveries: deliveries.map((value) => ({
+          ...value,
+          ...(value.savedRuleId
+            ? {
+                savedRuleStatus: savedRuleStatus(value),
+              }
+            : {}),
+        })),
+      };
+    },
+    async setRoute(botSlug, pairingId, expectedRevision) {
+      if (routeRevision(botSlug) !== expectedRevision)
+        throw new MessagingError('approval-route-stale');
+      if (pairingId === undefined) {
+        database.transaction(
+          (db) =>
+            db
+              .prepare(
+                'INSERT INTO messaging_approval_routes(bot_slug, revision, body) VALUES(?, ?, NULL) ON CONFLICT(bot_slug) DO UPDATE SET revision = excluded.revision, body = NULL',
+              )
+              .run(botSlug, expectedRevision + 1),
+          ['approval-messaging'],
+        );
+        return;
+      }
+      const paired = pairing.list(botSlug).find((p) => p.id === pairingId);
+      if (!paired) throw new MessagingError('approval-route-unavailable');
+      const selected = {
+        botSlug,
+        pairingId,
+        pairingRevision: paired.revision,
+        bindingId: paired.bindingId,
+        revision: expectedRevision + 1,
+      };
+      const context = resolve(selected);
+      const account = await context.provider.inspectAccount?.(context.identity.accountRef);
+      if (!account?.connected || account.fingerprint !== context.identity.fingerprint)
+        throw new MessagingError('provider-unavailable');
+      if (routeRevision(botSlug) !== expectedRevision)
+        throw new MessagingError('approval-route-stale');
+      resolve(selected);
+      database.transaction(
+        (db) =>
+          db
+            .prepare(
+              'INSERT INTO messaging_approval_routes(bot_slug, revision, body) VALUES(?, ?, ?) ON CONFLICT(bot_slug) DO UPDATE SET revision = excluded.revision, body = excluded.body',
+            )
+            .run(botSlug, selected.revision, JSON.stringify(selected)),
+        ['approval-messaging'],
+      );
+    },
+    async test(botSlug) {
+      const selected = route(botSlug);
+      if (!selected) throw new MessagingError('approval-route-unavailable');
+      resolve(selected);
+      const value: ApprovalDelivery = {
+        id: randomUUID(),
+        botSlug,
+        route: selected,
+        createdAt: new Date().toISOString(),
+        delivery: 'pending',
+        attempts: 0,
+        status: 'test',
+        update: 'none',
+      };
+      write(value);
+      return send(value.id);
+    },
+    async retry(botSlug, id) {
+      const value = read(id);
+      if (
+        !value ||
+        value.botSlug !== botSlug ||
+        value.delivery !== 'failed' ||
+        value.attempts >= MAX_ATTEMPTS
+      )
+        throw new MessagingError('approval-retry-unavailable');
+      return send(id);
+    },
+    refreshRules(botSlug) {
+      const values = database.read((db) =>
+        db
+          .prepare(
+            "SELECT body FROM messaging_approval_deliveries WHERE bot_slug = ? AND json_extract(body, '$.savedRuleId') IS NOT NULL",
+          )
+          .all(botSlug),
+      ) as { body: string }[];
+      for (const row of values) {
+        const value = JSON.parse(row.body) as ApprovalDelivery;
+        queueMicrotask(() => void update(value.id));
+      }
+    },
+    async action(providerId, event, signal) {
+      const value = read(event.requestId);
+      const authorized = () => {
+        try {
+          if (
+            !value ||
+            signal.aborted ||
+            value.status !== 'pending' ||
+            !safe(value) ||
+            !requestLive(value)
+          )
+            return false;
+          const context = resolve(value.route);
+          const paired = pairing.assert(
+            value.botSlug,
+            context.identity.id,
+            event.actorId,
+            event.action === 'rejected' ? 'reject' : 'approve',
+            value.route.pairingId,
+          );
+          return (
+            context.identity.providerId === providerId &&
+            context.identity.accountRef === event.botId &&
+            context.identity.fingerprint === event.fingerprint &&
+            paired.id === value.route.pairingId &&
+            paired.revision === value.route.pairingRevision &&
+            paired.conversationId === event.conversationId &&
+            value.delivery === 'sent' &&
+            value.receipt?.conversationId === event.conversationId &&
+            value.receipt.messageId === event.messageId
+          );
+        } catch {
+          return false;
+        }
+      };
+      if (!value || !authorized()) return { accepted: true, status: 'refused' };
+      const context = resolve(value.route);
+      if (event.kind === 'approval-rule') {
+        if (event.action === 'cancel-rule') {
+          if (
+            !value.ruleConfirmation ||
+            value.ruleConfirmation.id !== event.confirmationId ||
+            value.ruleConfirmation.actorId !== event.actorId
+          )
+            return { accepted: true, status: 'refused' };
+          const { ruleConfirmation: _confirmation, ...rest } = value;
+          write(rest);
+          queueMicrotask(() => void update(value.id));
+          return { accepted: true, status: 'queued' };
+        }
+        const kind =
+          event.action === 'preview-all-opaque' || event.action === 'confirm-all-opaque'
+            ? 'all-opaque'
+            : 'exact';
+        if (
+          !ruleAllowed(value, kind) ||
+          (kind === 'all-opaque' &&
+            (canonical(value)?.toolName === 'secret_cli' ||
+              owner?.ruleScope(value.botSlug, value.requestMessageId!)?.allOpaque === false))
+        )
+          return { accepted: true, status: 'refused' };
+        if (event.action === 'preview-exact' || event.action === 'preview-all-opaque') {
+          if (event.confirmationId || render(value).detail.length > 15000)
+            return { accepted: true, status: 'refused' };
+          if (
+            value.ruleConfirmation &&
+            (value.ruleConfirmation.kind !== kind ||
+              value.ruleConfirmation.actorId !== event.actorId)
+          )
+            return { accepted: true, status: 'refused' };
+          if (!value.ruleConfirmation) {
+            const scope = owner?.ruleScope(value.botSlug, value.requestMessageId!);
+            if (!scope) return { accepted: true, status: 'refused' };
+            write({
+              ...value,
+              ruleConfirmation: {
+                id: randomUUID(),
+                kind,
+                actorId: event.actorId,
+                scopeKey: scope.scopeKey,
+                presented: false,
+              },
+            });
+            queueMicrotask(() => void update(value.id));
+          }
+          return { accepted: true, status: 'queued' };
+        }
+        if (
+          !value.ruleConfirmation?.presented ||
+          value.ruleConfirmation.kind !== kind ||
+          value.ruleConfirmation.id !== event.confirmationId ||
+          value.ruleConfirmation.actorId !== event.actorId ||
+          owner?.ruleScope(value.botSlug, value.requestMessageId!)?.scopeKey !==
+            value.ruleConfirmation.scopeKey
+        )
+          return { accepted: true, status: 'refused' };
+      } else if (value.ruleConfirmation) return { accepted: true, status: 'refused' };
+      const confirmedRule = event.kind === 'approval-rule' ? value.ruleConfirmation : undefined;
+      const confirmationAuthorized = () => {
+        const latest = read(value.id)?.ruleConfirmation;
+        return (
+          !!confirmedRule &&
+          !!latest &&
+          latest.presented &&
+          latest.id === confirmedRule.id &&
+          latest.actorId === event.actorId &&
+          latest.kind === confirmedRule.kind &&
+          latest.scopeKey === confirmedRule.scopeKey &&
+          ruleAllowed(value, confirmedRule.kind)
+        );
+      };
+      const actor: ToolApprovalActor = {
+        platform: 'feishu',
+        bindingId: context.identity.id,
+        fingerprint: event.fingerprint,
+        actorId: event.actorId,
+        pairingId: value.route.pairingId,
+        pairingRevision: value.route.pairingRevision,
+        conversationId: event.conversationId,
+        messageId: event.messageId,
+      };
+      queueMicrotask(
+        () =>
+          void owner
+            ?.decide(
+              OWNER_HUMAN_CONTEXT,
+              value.botSlug,
+              value.requestMessageId!,
+              event.kind === 'approval-rule'
+                ? confirmedRule!.kind === 'all-opaque'
+                  ? 'allowed-always-all'
+                  : 'allowed-always-exact'
+                : event.action,
+              {
+                actor,
+                onRuleSaved: (rule) => {
+                  const latest = read(value.id);
+                  if (latest && rule.kind !== 'tool')
+                    write({ ...latest, savedRuleId: rule.id, savedRuleKind: rule.kind });
+                },
+                ...(event.kind === 'approval-rule'
+                  ? {
+                      rule: {
+                        kind: confirmedRule!.kind,
+                        scopeKey: confirmedRule!.scopeKey,
+                        authorized: confirmationAuthorized,
+                      },
+                    }
+                  : {}),
+                authorized: () => {
+                  try {
+                    if (signal.aborted || !safe(value)) return false;
+                    const paired = pairing.assert(
+                      value.botSlug,
+                      context.identity.id,
+                      event.actorId,
+                      event.action === 'rejected' ? 'reject' : 'approve',
+                      value.route.pairingId,
+                    );
+                    return (
+                      paired.id === actor.pairingId && paired.revision === actor.pairingRevision
+                    );
+                  } catch {
+                    return false;
+                  }
+                },
+              },
+            )
+            .then((accepted) => {
+              if (accepted) {
+                const latest = read(value.id);
+                if (latest) {
+                  write({
+                    ...latest,
+                    actor,
+                    ...(confirmedRule
+                      ? { savedRuleKind: latest.savedRuleKind ?? confirmedRule.kind }
+                      : {}),
+                  });
+                  if (event.kind === 'approval-rule') void update(value.id);
+                }
+              }
+            })
+            .catch(() => options.warn?.('approval-decision-result-unknown')),
+      );
+      return { accepted: true, status: 'queued' };
+    },
+    result(sessionId, event) {
+      if (closed) return;
+      if (
+        event.type !== 'tool/result' ||
+        !Number.isSafeInteger(event.seq) ||
+        !event.data ||
+        typeof event.data !== 'object'
+      )
+        return;
+      const data = event.data as Record<string, unknown>;
+      const message = data['message'];
+      if (
+        !message ||
+        typeof message !== 'object' ||
+        !('toolCallId' in message) ||
+        typeof message.toolCallId !== 'string'
+      )
+        return;
+      const callId = message.toolCallId;
+      const resultSeq = event.seq!;
+      const rows = database.read((db) =>
+        (
+          db
+            .prepare(
+              "SELECT body FROM messaging_approval_deliveries WHERE json_extract(body, '$.sessionId') = ? AND json_extract(body, '$.callId') = ? AND json_extract(body, '$.status') = 'allowed-once'",
+            )
+            .all(sessionId, callId) as { body: string }[]
+        ).map((row) => JSON.parse(row.body) as ApprovalDelivery),
+      );
+      for (const value of rows) {
+        const isError = 'isError' in message && message.isError === true;
+        resultText.set(value.id, JSON.stringify(message).slice(0, 2000));
+        if (resultText.size > 100) resultText.delete(resultText.keys().next().value!);
+        write({ ...value, status: isError ? 'execution-failed' : 'executed', resultSeq });
+        queueMicrotask(() => void update(value.id));
+      }
+    },
+    close() {
+      trace('host-disposal', 'release', 'closed', 0, 'cancelled', timers.size);
+      closed = true;
+      detach?.();
+      controller.abort();
+      for (const timer of timers.values()) clearTimeout(timer);
+      timers.clear();
+    },
+  };
+  return service;
+}

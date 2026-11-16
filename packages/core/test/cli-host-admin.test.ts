@@ -1,0 +1,976 @@
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
+import { runBotCreateCli } from '../src/bots/bot-create-cli.js';
+import { createChallenge, verifySolution } from '../src/marketplace/altcha.js';
+import { createReleaseService } from '../src/release/service.js';
+
+const servers: ReturnType<typeof createServer>[] = [];
+afterEach(async () => {
+  await Promise.all(
+    servers.splice(0).map(
+      (server) =>
+        new Promise<void>((resolve) => {
+          server.closeAllConnections();
+          server.close(() => resolve());
+        }),
+    ),
+  );
+});
+
+async function host(
+  handler: (method: string, args: Record<string, unknown>) => unknown | Promise<unknown>,
+) {
+  const calls: Array<{ method: string; args: Record<string, unknown> }> = [];
+  const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+    if (req.method === 'GET') {
+      if (
+        new URL(req.url!, 'http://localhost').searchParams.get('token') !== 'private-test-token'
+      ) {
+        res.writeHead(403).end();
+        return;
+      }
+      res.setHeader('set-cookie', 'authority=signed; HttpOnly');
+      res.writeHead(302, { location: '/' }).end();
+      return;
+    }
+    expect(req.headers.cookie).toBe('authority=signed');
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString());
+    const method = body.method.replace('botharness/', '');
+    calls.push({ method, args: body.payload.args });
+    res.setHeader('content-type', 'application/json');
+    res.end(
+      JSON.stringify({
+        type: 'server-response',
+        rpcId: body.rpcId,
+        result: await handler(method, body.payload.args),
+      }),
+    );
+  });
+  servers.push(server);
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('missing address');
+  return { url: `http://127.0.0.1:${address.port}`, calls };
+}
+
+async function invoke(argv: string[], url: string, stdin = '') {
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+  const code = await runBotCreateCli(argv, {
+    env: { DEEPSEEKBOT_HOST: url, DEEPSEEKBOT_HOST_TOKEN: 'private-test-token' },
+    stdout: (text) => stdout.push(text),
+    stderr: (text) => stderr.push(text),
+    readStdin: async () => stdin,
+  });
+  expect(stdout).toHaveLength(1);
+  expect(stdout.join('') + stderr.join('')).not.toContain('private-test-token');
+  return { code, json: JSON.parse(stdout.join('')), stderr };
+}
+
+const ok = (value: unknown) => ({ ok: true, value });
+
+describe('Bot Marketplace commands', () => {
+  it('browses, filters and reads listings through the Host', async () => {
+    const live = await host((method) =>
+      ok(
+        method === 'marketplaceTopics'
+          ? [{ topic: 'writing', count: 2 }]
+          : { method, bots: [], nextCursor: null },
+      ),
+    );
+    expect((await invoke(['marketplace-list'], live.url)).json.method).toBe('marketplaceList');
+    await invoke(
+      [
+        'marketplace-list',
+        '--query',
+        '翻译',
+        '--topic',
+        'writing',
+        '--sort',
+        'stars',
+        '--cursor',
+        'c2',
+        '--lang',
+        'zh',
+      ],
+      live.url,
+    );
+    expect((await invoke(['marketplace-topics'], live.url)).json).toEqual({
+      topics: [{ topic: 'writing', count: 2 }],
+    });
+    await invoke(['marketplace-list', '--sort', 'created'], live.url);
+    await invoke(['marketplace-detail', 'owner/repo'], live.url);
+    await invoke(['marketplace-detail', 'owner/repo', '--lang', 'en'], live.url);
+    await invoke(['marketplace-file', 'U_abc', 'notes/today.md'], live.url);
+    await invoke(['marketplace-sections'], live.url);
+    await invoke(['marketplace-sections', '--lang', 'zh'], live.url);
+    await invoke(['marketplace-digest'], live.url);
+    await invoke(['marketplace-digest', '--day', '2026-10-28', '--lang', 'en'], live.url);
+    await invoke(['marketplace-digests', '--lang', 'zh'], live.url);
+    expect(live.calls).toEqual([
+      { method: 'marketplaceList', args: { query: {} } },
+      {
+        method: 'marketplaceList',
+        args: { query: { q: '翻译', topic: 'writing', sort: 'stars', cursor: 'c2', lang: 'zh' } },
+      },
+      { method: 'marketplaceTopics', args: {} },
+      { method: 'marketplaceList', args: { query: { sort: 'created' } } },
+      { method: 'marketplaceDetail', args: { id: 'owner/repo' } },
+      { method: 'marketplaceDetail', args: { id: 'owner/repo', lang: 'en' } },
+      { method: 'marketplaceFileView', args: { id: 'U_abc', path: 'notes/today.md' } },
+      { method: 'marketplaceSections', args: {} },
+      { method: 'marketplaceSections', args: { lang: 'zh' } },
+      { method: 'marketplaceDigest', args: {} },
+      { method: 'marketplaceDigest', args: { day: '2026-10-28', lang: 'en' } },
+      { method: 'marketplaceDigests', args: { lang: 'zh' } },
+    ]);
+  });
+
+  it('prints each digest with its pick names', async () => {
+    const digests = [
+      {
+        day: '2026-10-28',
+        lang: 'en',
+        title: 'Bots worth trying today',
+        lede: 'Two picks.',
+        picks: [
+          { id: 'R_one', displayName: 'Writer', banner: null, avatar: null },
+          {
+            id: 'U_two',
+            displayName: null,
+            banner: { recipe: { scene: 'sea', seed: 7 } },
+            avatar: null,
+          },
+        ],
+      },
+      { day: '2026-10-27', lang: 'en', title: 'Older picks', lede: 'None left.', picks: [] },
+    ];
+    const live = await host(() => ok({ digests }));
+    const result = await invoke(['marketplace-digests'], live.url);
+    expect(result.json).toEqual({ digests });
+    expect(result.stderr).toEqual([
+      'tobs: 2026-10-28 Bots worth trying today | Writer, U_two',
+      'tobs: 2026-10-27 Older picks',
+    ]);
+  });
+
+  it('refuses bad arguments before reaching the Host', async () => {
+    const live = await host(() => ok({}));
+    for (const argv of [
+      ['marketplace-list', '--sort', 'newest'],
+      ['marketplace-list', 'extra'],
+      ['marketplace-detail'],
+      ['marketplace-file', 'U_abc'],
+      ['marketplace-topics', '--sort', 'stars'],
+      ['marketplace-list', '--lang', 'fr'],
+      ['marketplace-topics', '--lang', 'zh'],
+      ['marketplace-sections', 'hot'],
+      ['marketplace-sections', '--lang', 'fr'],
+      ['marketplace-digest', '--day', 'yesterday'],
+      ['marketplace-digests', '--day', '2026-10-28'],
+      ['marketplace-digest', '2026-10-28'],
+      ['marketplace-report', 'owner/repo', '--reason', 'x'.repeat(501)],
+    ])
+      expect((await invoke(argv, live.url)).json.error.code).toBe('usage');
+    expect(live.calls).toEqual([]);
+  });
+
+  it('uploads and installs Uploaded Bots through the Host', async () => {
+    const live = await host((method) => ok({ method }));
+    await invoke(['marketplace-list', '--include-uploads'], live.url);
+    await invoke(['marketplace-account'], live.url);
+    await invoke(['marketplace-author', '--name', ' 爱丽丝 ', '--accept-terms'], live.url);
+    await invoke(['marketplace-upload-plan', 'bot-1'], live.url);
+    await invoke(
+      [
+        'marketplace-upload',
+        'bot-1',
+        '--name',
+        'Helper',
+        '--description',
+        'Writes things down',
+        '--role',
+        'writing',
+        '--confirm',
+      ],
+      live.url,
+    );
+    await invoke(['marketplace-install', 'U_abc', '--lang', 'zh'], live.url);
+    await invoke(
+      [
+        'marketplace-install',
+        'U_abc',
+        '--review',
+        'review-1',
+        '--confirm',
+        '--operation-key',
+        'install-0001',
+      ],
+      live.url,
+    );
+    expect(live.calls).toEqual([
+      { method: 'marketplaceList', args: { query: { includeUploads: true } } },
+      { method: 'marketplaceAccount', args: {} },
+      { method: 'marketplaceAuthorSave', args: { displayName: '爱丽丝', acceptTerms: true } },
+      { method: 'marketplaceUploadPlan', args: { slug: 'bot-1' } },
+      {
+        method: 'marketplaceUpload',
+        args: {
+          slug: 'bot-1',
+          displayName: 'Helper',
+          bio: 'Writes things down',
+          tags: ['writing'],
+        },
+      },
+      { method: 'marketplaceInstallReview', args: { id: 'U_abc', lang: 'zh' } },
+      {
+        method: 'marketplaceInstall',
+        args: { id: 'U_abc', reviewId: 'review-1', operationKey: 'install-0001' },
+      },
+    ]);
+  });
+
+  it('prints what Tob found and asks for --review and --confirm before installing', async () => {
+    const live = await host((method) =>
+      method === 'marketplaceInstallReview'
+        ? ok({
+            reviewId: 'review-1',
+            listing: { id: 'U_abc' },
+            review: {
+              status: 'reviewed',
+              findings: [{ kind: 'exfiltration', path: 'persona.md', note: 'Sends notes out' }],
+              files: 2,
+              read: 2,
+              partial: false,
+            },
+          })
+        : ok({ bot: { slug: 'bot-2' }, channelId: 'dm-2' }),
+    );
+    const reviewed = await invoke(['marketplace-install', 'U_abc'], live.url);
+    expect(reviewed.code).toBe(0);
+    expect(reviewed.json).toMatchObject({
+      installed: false,
+      reviewId: 'review-1',
+      review: { findings: [{ kind: 'exfiltration', path: 'persona.md' }] },
+      next: ['deepseekbot marketplace-install U_abc --review review-1 --confirm'],
+    });
+    for (const argv of [
+      ['marketplace-install', 'U_abc', '--confirm'],
+      ['marketplace-install', 'U_abc', '--review', 'review-1'],
+      ['marketplace-detail', 'U_abc', '--review', 'review-1'],
+    ])
+      expect((await invoke(argv, live.url)).json.error.code).toBe('usage');
+    const installed = await invoke(
+      ['marketplace-install', 'U_abc', '--review', 'review-1', '--confirm'],
+      live.url,
+    );
+    expect(installed.json).toMatchObject({ installed: true, bot: { slug: 'bot-2' } });
+    expect(live.calls.map((call) => call.method)).toEqual([
+      'marketplaceInstallReview',
+      'marketplaceInstall',
+    ]);
+  });
+
+  it('lists, replaces and deletes your Uploaded Bots through the Host', async () => {
+    const live = await host((method) => ok({ method }));
+    await invoke(['marketplace-mine', '--lang', 'zh'], live.url);
+    await invoke(
+      ['marketplace-upload', 'bot-1', '--name', 'Helper', '--replaces', 'U_abc', '--confirm'],
+      live.url,
+    );
+    await invoke(['marketplace-delete', 'U_abc', '--confirm'], live.url);
+    expect(live.calls).toEqual([
+      { method: 'marketplaceMine', args: { lang: 'zh' } },
+      {
+        method: 'marketplaceUpload',
+        args: { slug: 'bot-1', displayName: 'Helper', replaces: 'U_abc' },
+      },
+      { method: 'marketplaceDelete', args: { id: 'U_abc' } },
+    ]);
+  });
+
+  it('needs --confirm before deleting an Uploaded Bot', async () => {
+    const live = await host(() => ok({}));
+    for (const argv of [
+      ['marketplace-delete', 'U_abc'],
+      ['marketplace-mine', '--replaces', 'U_abc'],
+    ])
+      expect((await invoke(argv, live.url)).json.error.code).toBe('usage');
+    expect(live.calls).toEqual([]);
+  });
+
+  it('needs --confirm and a name before uploading a Bot', async () => {
+    const live = await host(() => ok({}));
+    for (const argv of [
+      ['marketplace-upload', 'bot-1', '--name', 'Helper'],
+      ['marketplace-upload', 'bot-1', '--confirm'],
+      ['marketplace-author'],
+      ['marketplace-author-avatar'],
+      ['marketplace-author-avatar', '--file', 'a.png', '--clear'],
+      ['marketplace-detail', 'x', '--include-uploads'],
+    ])
+      expect((await invoke(argv, live.url)).json.error.code).toBe('usage');
+    expect(live.calls).toEqual([]);
+  });
+
+  it('sets the Account Profile avatar from an image file or clears it', async () => {
+    const live = await host((method) => ok({ method }));
+    const file = join(mkdtempSync(join(tmpdir(), 'author-avatar-')), 'me.png');
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1]);
+    writeFileSync(file, png);
+    await invoke(['marketplace-author-avatar', '--file', file], live.url);
+    await invoke(['marketplace-author-avatar', '--clear'], live.url);
+    expect(live.calls).toEqual([
+      {
+        method: 'marketplaceAuthorAvatarSet',
+        args: { avatar: `data:image/png;base64,${png.toString('base64')}` },
+      },
+      { method: 'marketplaceAuthorAvatarSet', args: { avatar: null } },
+    ]);
+    writeFileSync(file, 'not an image');
+    expect(
+      (await invoke(['marketplace-author-avatar', '--file', file], live.url)).json.error.code,
+    ).toBe('usage');
+  });
+
+  it('solves the Host challenge before submitting or reporting, like the Web UI', async () => {
+    const key = 'challenge-key';
+    const live = await host(async (method, args) => {
+      if (method === 'marketplaceChallenge')
+        return ok(await createChallenge({ key, tier: 'default', now: new Date(), number: 42 }));
+      const check = await verifySolution({ key, payload: String(args['altcha']), now: new Date() });
+      if (!check.ok) return { ok: false, error: { code: 'challenge-invalid', message: 'bad' } };
+      if (method === 'marketplaceSubmit') return ok({ bot: { id: 'owner/repo' } });
+      return ok({ received: true });
+    });
+    const submitted = await invoke(
+      ['marketplace-submit', 'https://github.com/owner/repo'],
+      live.url,
+    );
+    expect(submitted.code).toBe(0);
+    expect(submitted.json).toEqual({ bot: { id: 'owner/repo' } });
+    expect(
+      (await invoke(['marketplace-report', 'owner/repo', '--reason', '  spam  '], live.url)).json,
+    ).toEqual({ received: true });
+    await invoke(['marketplace-report', 'owner/repo'], live.url);
+    expect(live.calls.map((call) => call.method)).toEqual([
+      'marketplaceChallenge',
+      'marketplaceSubmit',
+      'marketplaceChallenge',
+      'marketplaceReport',
+      'marketplaceChallenge',
+      'marketplaceReport',
+    ]);
+    expect(live.calls[1]!.args['url']).toBe('https://github.com/owner/repo');
+    expect(live.calls[3]!.args).toMatchObject({ id: 'owner/repo', reason: 'spam' });
+    expect(live.calls[5]!.args).not.toHaveProperty('reason');
+  });
+
+  it('passes Host refusals through with their code', async () => {
+    const live = await host((method) =>
+      method === 'marketplaceChallenge'
+        ? { ok: false, error: { code: 'marketplace-unavailable', message: 'unavailable' } }
+        : ok({}),
+    );
+    const refused = await invoke(['marketplace-submit', 'https://github.com/o/r'], live.url);
+    expect(refused.code).not.toBe(0);
+    expect(refused.json.error.code).toBe('marketplace-unavailable');
+    expect(live.calls.map((call) => call.method)).toEqual(['marketplaceChallenge']);
+  });
+});
+
+describe('release commands', () => {
+  it('exposes the Host identity and preserves its coded update/restart refusal', async () => {
+    const service = createReleaseService({
+      version: () => 'unknown',
+      ledgers: () => undefined,
+      identity: () => ({ kind: 'unknown', reason: 'component-mismatch' }),
+    });
+    const live = await host(async (method, args) =>
+      ok(
+        method === 'releaseInfo'
+          ? service.info()
+          : method === 'releaseUpdate'
+            ? await service.update()
+            : method === 'releaseInstall'
+              ? await service.install(String(args['version']))
+              : await service.restart(),
+      ),
+    );
+    expect((await invoke(['release-info'], live.url)).json.identity).toEqual({
+      kind: 'unknown',
+      reason: 'component-mismatch',
+    });
+    expect((await invoke(['release-check'], live.url)).json).toEqual({
+      status: 'unknown',
+      current: 'unknown',
+      reason: 'component-mismatch',
+    });
+    for (const argv of [
+      ['release-install', '2.0.0', '--confirm'],
+      ['release-restart', '--confirm'],
+    ]) {
+      const refused = await invoke(argv, live.url);
+      expect(refused.code).not.toBe(0);
+      expect(refused.json.error.code).toBe('release-identity-invalid');
+    }
+  });
+  it('checks, installs and restarts only with --confirm', async () => {
+    const live = await host((method, args) =>
+      ok(
+        method === 'releaseUpdate'
+          ? { status: 'available', current: '1.1.0', latest: '1.2.0', installable: true }
+          : method === 'releaseInstall'
+            ? {
+                status: 'installed',
+                current: '1.1.0',
+                installed: args['version'],
+                restartable: true,
+              }
+            : { status: 'restarting' },
+      ),
+    );
+    expect((await invoke(['release-check'], live.url)).json.latest).toBe('1.2.0');
+    for (const argv of [['release-install', '1.2.0'], ['release-restart'], ['release-install']]) {
+      const refused = await invoke(argv, live.url);
+      expect(refused.code).not.toBe(0);
+      expect(refused.json.error.code).toBe('usage');
+    }
+    expect((await invoke(['release-install', '1.2.0', '--confirm'], live.url)).json.status).toBe(
+      'installed',
+    );
+    expect((await invoke(['release-restart', '--confirm'], live.url)).json).toEqual({
+      status: 'restarting',
+    });
+    expect(live.calls).toEqual([
+      { method: 'releaseUpdate', args: {} },
+      { method: 'releaseInstall', args: { version: '1.2.0' } },
+      { method: 'releaseRestart', args: {} },
+    ]);
+  });
+
+  it('turns a failed install or restart into a coded failure', async () => {
+    const live = await host((method) =>
+      ok(
+        method === 'releaseInstall'
+          ? { status: 'failed', reason: 'network', diagnostic: 'registry timed out' }
+          : { status: 'failed', reason: 'not-pending' },
+      ),
+    );
+    const install = await invoke(['release-install', '9.9.9', '--confirm'], live.url);
+    expect(install.code).not.toBe(0);
+    expect(install.json.error.code).toBe('release-network');
+    expect(install.json.error.message).toContain('registry timed out');
+    const restart = await invoke(['release-restart', '--confirm'], live.url);
+    expect(restart.json.error.code).toBe('release-not-pending');
+  });
+});
+
+describe('plugin update commands', () => {
+  it('checks, installs and restarts plugins only with --confirm', async () => {
+    const live = await host((method, args) =>
+      ok(
+        method === 'pluginUpdates'
+          ? {
+              installable: true,
+              restartable: true,
+              plugins: [
+                {
+                  name: '@botharness/vrm-companion',
+                  status: 'available',
+                  current: '0.1.0',
+                  latest: '0.2.0',
+                },
+              ],
+            }
+          : method === 'pluginInstall'
+            ? {
+                status: 'installed',
+                name: args['name'],
+                current: '0.1.0',
+                installed: args['version'],
+                restartable: true,
+                applied: false,
+              }
+            : { status: 'restarting', plugins: ['@botharness/vrm-companion'] },
+      ),
+    );
+    expect((await invoke(['plugin-check', '--force'], live.url)).json.plugins[0].latest).toBe(
+      '0.2.0',
+    );
+    for (const argv of [
+      ['plugin-install', '@botharness/vrm-companion', '0.2.0'],
+      ['plugin-install', '@botharness/vrm-companion', '--confirm'],
+      ['plugin-restart'],
+    ]) {
+      const refused = await invoke(argv, live.url);
+      expect(refused.code).not.toBe(0);
+      expect(refused.json.error.code).toBe('usage');
+    }
+    expect(
+      (
+        await invoke(
+          ['plugin-install', '@botharness/vrm-companion', '0.2.0', '--confirm'],
+          live.url,
+        )
+      ).json.installed,
+    ).toBe('0.2.0');
+    expect((await invoke(['plugin-restart', '--confirm'], live.url)).json.status).toBe(
+      'restarting',
+    );
+    expect(live.calls).toEqual([
+      { method: 'pluginUpdates', args: { force: true } },
+      { method: 'pluginInstall', args: { name: '@botharness/vrm-companion', version: '0.2.0' } },
+      { method: 'pluginRestart', args: {} },
+    ]);
+  });
+
+  it('turns a failed plugin install or restart into a coded failure', async () => {
+    const live = await host((method) =>
+      ok(
+        method === 'pluginInstall'
+          ? {
+              status: 'failed',
+              name: '@botharness/vrm-companion',
+              reason: 'incompatible',
+              logPath: '/tmp/install.log',
+            }
+          : { status: 'failed', reason: 'not-pending' },
+      ),
+    );
+    const install = await invoke(
+      ['plugin-install', '@botharness/vrm-companion', '0.3.0', '--confirm'],
+      live.url,
+    );
+    expect(install.code).not.toBe(0);
+    expect(install.json.error.code).toBe('plugin-incompatible');
+    expect(install.json.error.message).toContain('/tmp/install.log');
+    const restart = await invoke(['plugin-restart', '--confirm'], live.url);
+    expect(restart.json.error.code).toBe('plugin-not-pending');
+  });
+});
+
+describe('update run commands', () => {
+  const running = {
+    id: 'req-00000001',
+    kind: 'plugin',
+    name: '@botharness/vrm-companion',
+    version: '0.2.0',
+    phase: 'installing',
+    startedAt: '2026-11-09T18:00:00.000Z',
+    commands: [{ id: 'job-1', command: 'pnpm add x', output: 'Progress', truncated: false }],
+    cancellable: true,
+  };
+
+  it('shows the running update and stops it by its id', async () => {
+    const live = await host((method) =>
+      ok(method === 'updateRun' ? running : { status: 'cancelled' }),
+    );
+    expect((await invoke(['update-status'], live.url)).json).toEqual({ run: running });
+    expect((await invoke(['update-cancel'], live.url)).json).toEqual({
+      id: 'req-00000001',
+      status: 'cancelled',
+    });
+    expect(live.calls).toEqual([
+      { method: 'updateRun', args: {} },
+      { method: 'updateRun', args: {} },
+      { method: 'updateCancel', args: { id: 'req-00000001' } },
+    ]);
+  });
+
+  it('refuses to stop when nothing runs or the update is already applying', async () => {
+    const idle = await host(() => ok(null));
+    expect((await invoke(['update-status'], idle.url)).json).toEqual({ run: null });
+    const none = await invoke(['update-cancel'], idle.url);
+    expect(none.code).not.toBe(0);
+    expect(none.json.error.code).toBe('update-not-running');
+    const late = await host((method) =>
+      ok(method === 'updateRun' ? running : { status: 'too-late' }),
+    );
+    expect((await invoke(['update-cancel'], late.url)).json.error.code).toBe('update-too-late');
+    const extra = await invoke(['update-status', 'extra'], idle.url);
+    expect(extra.json.error.code).toBe('usage');
+  });
+});
+
+describe('data reset commands', () => {
+  it('previews, then clears only with --confirmation-stdin --confirm and a token', async () => {
+    const preview = {
+      token: 'reset-token',
+      expiresAt: '2026-10-20T18:00:00.000Z',
+      bots: 2,
+      targets: [{ kind: 'data', path: '/home/a/.dsh/botharness', bytes: 10, files: 1 }],
+      kept: [{ kind: 'credentials', path: '/home/a/.dsh/.credentials.yaml' }],
+      restartable: true,
+    };
+    const live = await host((method) =>
+      ok(method === 'dataResetPreview' ? { preview } : { reset: { status: 'restarting' } }),
+    );
+    expect((await invoke(['data-reset-preview'], live.url)).json).toEqual({ preview });
+    const token = JSON.stringify({ token: 'reset-token' });
+    for (const [argv, stdin] of [
+      [['data-reset-confirm', '--confirmation-stdin'], token],
+      [['data-reset-confirm', '--confirm'], token],
+      [['data-reset-confirm', '--confirmation-stdin', '--confirm'], ''],
+      [['data-reset-confirm', '--confirmation-stdin', '--confirm'], '{"token":"t","extra":1}'],
+      [['data-reset-preview', 'extra'], ''],
+    ] as const) {
+      const refused = await invoke([...argv], live.url, stdin);
+      expect(refused.code).not.toBe(0);
+      expect(refused.json.error.code).toBe('usage');
+    }
+    expect(
+      (await invoke(['data-reset-confirm', '--confirmation-stdin', '--confirm'], live.url, token))
+        .json,
+    ).toEqual({ reset: { status: 'restarting' } });
+    expect(live.calls).toEqual([
+      { method: 'dataResetPreview', args: {} },
+      { method: 'dataResetConfirm', args: { token: 'reset-token' } },
+    ]);
+  });
+});
+
+describe('storage commands', () => {
+  it('shows usage, previews by age and confirms with the piped preview', async () => {
+    const scope = { before: '2026-07-22T00:00:00.000Z', channelIds: ['dm-ada'], kinds: ['image'] };
+    const preview = { token: 'storage-token', scope, files: 2, freedBytes: 2048 };
+    const live = await host((method) =>
+      ok(
+        method === 'storageUsage'
+          ? { totalBytes: 4096, parts: [], chats: [] }
+          : method === 'storageCleanupPreview'
+            ? preview
+            : { messages: 1, files: 2, freedBytes: 2048 },
+      ),
+    );
+    expect((await invoke(['storage-usage'], live.url)).json.totalBytes).toBe(4096);
+    expect(
+      (
+        await invoke(
+          [
+            'storage-cleanup-preview',
+            '--before',
+            scope.before,
+            '--chat',
+            'dm-ada',
+            '--media',
+            'image',
+          ],
+          live.url,
+        )
+      ).json,
+    ).toEqual(preview);
+    for (const [argv, stdin] of [
+      [['storage-cleanup-preview'], ''],
+      [['storage-cleanup-preview', '--older-than-days', '-1'], ''],
+      [['storage-cleanup-preview', '--older-than-days', '9', '--media', 'sticker'], ''],
+      [['storage-cleanup-confirm', '--confirmation-stdin'], JSON.stringify(preview)],
+      [['storage-cleanup-confirm', '--confirm'], JSON.stringify(preview)],
+      [['storage-cleanup-confirm', '--confirmation-stdin', '--confirm'], 'not json'],
+    ] as const) {
+      const refused = await invoke([...argv], live.url, stdin);
+      expect(refused.code).not.toBe(0);
+      expect(refused.json.error.code).toBe('usage');
+    }
+    expect(
+      (
+        await invoke(
+          ['storage-cleanup-confirm', '--confirmation-stdin', '--confirm'],
+          live.url,
+          JSON.stringify(preview),
+        )
+      ).json,
+    ).toEqual({ messages: 1, files: 2, freedBytes: 2048 });
+    expect(live.calls).toEqual([
+      { method: 'storageUsage', args: {} },
+      { method: 'storageCleanupPreview', args: scope },
+      { method: 'storageCleanupConfirm', args: { ...scope, token: 'storage-token' } },
+    ]);
+  });
+});
+
+describe('storage message commands', () => {
+  it('previews old messages by age and deletes them with the piped preview', async () => {
+    const scope = { before: '2026-07-22T00:00:00.000Z', channelIds: ['dm-ada'] };
+    const preview = { token: 'messages-token', scope, messages: 3, more: false };
+    const live = await host((method) =>
+      ok(method === 'storageMessagesCleanupPreview' ? preview : { messages: 3, freedBytes: 4096 }),
+    );
+    expect(
+      (
+        await invoke(
+          ['storage-messages-cleanup-preview', '--before', scope.before, '--chat', 'dm-ada'],
+          live.url,
+        )
+      ).json,
+    ).toEqual(preview);
+    for (const [argv, stdin] of [
+      [['storage-messages-cleanup-preview', '--older-than-days', '9', '--media', 'image'], ''],
+      [['storage-messages-cleanup-confirm', '--confirmation-stdin'], JSON.stringify(preview)],
+    ] as const) {
+      const refused = await invoke([...argv], live.url, stdin);
+      expect(refused.code).not.toBe(0);
+      expect(refused.json.error.code).toBe('usage');
+    }
+    expect(
+      (
+        await invoke(
+          ['storage-messages-cleanup-confirm', '--confirmation-stdin', '--confirm'],
+          live.url,
+          JSON.stringify(preview),
+        )
+      ).json,
+    ).toEqual({ messages: 3, freedBytes: 4096 });
+    expect(live.calls).toEqual([
+      { method: 'storageMessagesCleanupPreview', args: scope },
+      { method: 'storageMessagesCleanupConfirm', args: { ...scope, token: 'messages-token' } },
+    ]);
+  });
+});
+
+describe('telemetry and Git commands', () => {
+  it('reads and sets usage statistics and Git through the Host', async () => {
+    const live = await host((method, args) =>
+      ok(
+        method.startsWith('telemetry')
+          ? { enabled: args['enabled'] ?? true, preference: args['enabled'] ?? true }
+          : { state: method === 'gitInstall' ? 'installing' : 'missing' },
+      ),
+    );
+    expect((await invoke(['telemetry-status'], live.url)).json.enabled).toBe(true);
+    expect((await invoke(['telemetry-set', '--disabled'], live.url)).json.enabled).toBe(false);
+    await invoke(['telemetry-set', '--enabled'], live.url);
+    expect((await invoke(['telemetry-set'], live.url)).json.error.code).toBe('usage');
+    expect((await invoke(['git-status'], live.url)).json.state).toBe('missing');
+    expect((await invoke(['git-install'], live.url)).json.state).toBe('installing');
+    expect(live.calls).toEqual([
+      { method: 'telemetryStatus', args: {} },
+      { method: 'telemetrySet', args: { enabled: false } },
+      { method: 'telemetrySet', args: { enabled: true } },
+      { method: 'gitStatus', args: {} },
+      { method: 'gitInstall', args: {} },
+    ]);
+  });
+});
+
+describe('pairing commands', () => {
+  const pairing = {
+    id: '6d1f3c51-2a5e-4f4c-9a39-111111111111',
+    reference: 'K7Q2',
+    status: 'pending',
+    purpose: 'conversation',
+    accountName: 'Lark QA',
+    actorId: 'ou_1',
+    conversationId: 'oc_1',
+    capabilities: [],
+    revision: 3,
+    expiresAt: '2026-10-14T13:20:00.000Z',
+    createdAt: '2026-10-14T13:10:00.000Z',
+    privateReply: { token: 'internal' },
+  };
+  const role = {
+    id: '0b6f8a52-3f0d-4c1e-8f7e-222222222222',
+    name: 'Reviewer',
+    capabilities: ['approve'],
+    revision: 5,
+    behavior: 'b',
+  };
+  const snapshot = () => ok({ pairings: [pairing], roles: [role], accounts: [] });
+
+  it('lists pairings without internal reply handles', async () => {
+    const live = await host(snapshot);
+    const listed = (await invoke(['pairing-list', 'ada'], live.url)).json;
+    expect(listed.pairings).toEqual([
+      expect.objectContaining({ id: pairing.id, reference: 'K7Q2', revision: 3 }),
+    ]);
+    expect(listed.pairings[0]).not.toHaveProperty('privateReply');
+    expect(listed.roles).toEqual([
+      { id: role.id, name: 'Reviewer', capabilities: ['approve'], revision: 5 },
+    ]);
+    expect(live.calls).toEqual([{ method: 'messagingSnapshot', args: { slug: 'ada' } }]);
+  });
+
+  it('reviews against the current revisions the Host reports', async () => {
+    const live = await host((method, args) =>
+      method === 'messagingSnapshot'
+        ? snapshot()
+        : ok({
+            pairing: {
+              ...pairing,
+              status: (args['input'] as { kind: string }).kind === 'approve' ? 'approved' : 'x',
+            },
+          }),
+    );
+    expect(
+      (
+        await invoke(
+          ['pairing-review', 'ada', pairing.id, '--decision', 'approve', '--role', role.id],
+          live.url,
+        )
+      ).json.pairing.status,
+    ).toBe('approved');
+    await invoke(
+      [
+        'pairing-review',
+        'ada',
+        pairing.id,
+        '--decision',
+        'approve',
+        '--capability',
+        'approve',
+        '--capability',
+        'answer',
+      ],
+      live.url,
+    );
+    await invoke(['pairing-review', 'ada', pairing.id, '--decision', 'reject'], live.url);
+    await invoke(
+      ['pairing-review', 'ada', pairing.id, '--decision', 'revoke', '--confirm'],
+      live.url,
+    );
+    expect(live.calls.filter((call) => call.method === 'pairingReview')).toEqual([
+      {
+        method: 'pairingReview',
+        args: {
+          slug: 'ada',
+          input: {
+            kind: 'approve',
+            id: pairing.id,
+            expectedRevision: 3,
+            roleId: role.id,
+            expectedRoleRevision: 5,
+          },
+        },
+      },
+      {
+        method: 'pairingReview',
+        args: {
+          slug: 'ada',
+          input: {
+            kind: 'approve',
+            id: pairing.id,
+            expectedRevision: 3,
+            capabilities: ['approve', 'answer'],
+          },
+        },
+      },
+      {
+        method: 'pairingReview',
+        args: { slug: 'ada', input: { kind: 'reject', id: pairing.id, expectedRevision: 3 } },
+      },
+      {
+        method: 'pairingReview',
+        args: { slug: 'ada', input: { kind: 'revoke', id: pairing.id, expectedRevision: 3 } },
+      },
+    ]);
+  });
+
+  it('refuses unclear decisions, revoke without --confirm and unknown ids', async () => {
+    const live = await host(snapshot);
+    for (const argv of [
+      ['pairing-review', 'ada', pairing.id],
+      ['pairing-review', 'ada', pairing.id, '--decision', 'approve'],
+      [
+        'pairing-review',
+        'ada',
+        pairing.id,
+        '--decision',
+        'approve',
+        '--role',
+        role.id,
+        '--capability',
+        'approve',
+      ],
+      ['pairing-review', 'ada', pairing.id, '--decision', 'approve', '--capability', 'admin'],
+      ['pairing-review', 'ada', pairing.id, '--decision', 'reject', '--capability', 'approve'],
+      ['pairing-review', 'ada', pairing.id, '--decision', 'revoke'],
+      ['pairing-review', 'ada'],
+    ])
+      expect((await invoke(argv, live.url)).json.error.code).toBe('usage');
+    expect(live.calls).toEqual([]);
+    expect(
+      (await invoke(['pairing-review', 'ada', 'missing', '--decision', 'reject'], live.url)).json
+        .error.code,
+    ).toBe('unknown-pairing');
+    expect(
+      (
+        await invoke(
+          ['pairing-review', 'ada', pairing.id, '--decision', 'approve', '--role', 'nope'],
+          live.url,
+        )
+      ).json.error.code,
+    ).toBe('unknown-role');
+    expect(live.calls.map((call) => call.method)).toEqual([
+      'messagingSnapshot',
+      'messagingSnapshot',
+    ]);
+  });
+});
+
+it('prepares Home through the authenticated owner and returns one JSON result', async () => {
+  const live = await host(() => ok({ botSlug: 'tob-id', channelId: 'dm-tob-id' }));
+  const result = await invoke(['tob-home'], live.url);
+  expect(result.code).toBe(0);
+  expect(result.json).toEqual({ botSlug: 'tob-id', channelId: 'dm-tob-id' });
+  expect(live.calls).toEqual([{ method: 'tobHome', args: {} }]);
+  expect((await invoke(['tob-home', 'unexpected'], live.url)).json.error.code).toBe('usage');
+});
+
+it('routes archive and restore through the Host and retains protected Tob refusal', async () => {
+  const live = await host((method, args) =>
+    args.slug === 'tob'
+      ? { ok: false, error: { code: 'protected-bot', message: 'Tob cannot be archived' } }
+      : ok({ bot: { slug: args.slug, paused: method === 'pause' } }),
+  );
+  expect(await invoke(['pause', 'tob'], live.url)).toMatchObject({
+    code: 1,
+    json: { error: { code: 'protected-bot' } },
+  });
+  expect((await invoke(['pause', 'ordinary'], live.url)).json.bot.paused).toBe(true);
+  expect((await invoke(['resume', 'ordinary'], live.url)).json.bot.paused).toBe(false);
+});
+
+it('release-check --force forwards the manual refresh to the Host cache owner', async () => {
+  const server = await host(() =>
+    ok({
+      status: 'blocked',
+      current: '1.3.1',
+      latest: '1.4.0',
+      compatibility: { status: 'unknown', reason: 'runtime-unavailable' },
+    }),
+  );
+  const result = await invoke(['release-check', '--force'], server.url);
+  expect(server.calls).toEqual([{ method: 'releaseUpdate', args: { force: true } }]);
+  expect(result.code).toBe(0);
+});
+
+it('queries and changes onboarding through the owning Host with coded invalid-action refusal', async () => {
+  const live = await host((method, args) => ok({ method, ...args }));
+  expect((await invoke(['onboarding'], live.url)).json.method).toBe('onboarding');
+  expect((await invoke(['onboarding', '--action', 'pause'], live.url)).json.action).toBe('pause');
+  expect((await invoke(['onboarding', '--action', 'invalid'], live.url)).code).not.toBe(0);
+  expect(live.calls).toHaveLength(2);
+});
+
+it('reads and records Profile notice acknowledgements through the owning Host', async () => {
+  const live = await host((method, args) => ok({ method, ...args }));
+  expect((await invoke(['acknowledgements'], live.url)).json.method).toBe('acknowledgements');
+  expect((await invoke(['acknowledge', 'bot-mode-entered'], live.url)).json).toEqual({
+    method: 'acknowledge',
+    key: 'bot-mode-entered',
+  });
+  expect(
+    (await invoke(['acknowledge', 'release-notes-seen', '--version', '1.6.1'], live.url)).json,
+  ).toEqual({ method: 'acknowledge', key: 'release-notes-seen', value: '1.6.1' });
+  expect((await invoke(['acknowledge', 'release-notes-seen'], live.url)).code).not.toBe(0);
+  expect(
+    (await invoke(['acknowledge', 'onboarding-intro', '--version', '1.6.1'], live.url)).code,
+  ).not.toBe(0);
+  expect((await invoke(['onboarding', '--version', '1.6.1'], live.url)).code).not.toBe(0);
+  expect(live.calls).toHaveLength(3);
+});

@@ -1,0 +1,240 @@
+import { Text } from './primitives/system-text';
+import { useCallback, useRef, useState } from 'react';
+import { Platform, ScrollView, View, type ViewInstance } from 'react-native';
+
+import {
+  readableInput,
+  type ApprovalChoice,
+  type ApprovalRequest,
+  type DecisionResult,
+} from '../host/requests';
+import { alwaysNote, executionNote, expiryLabel, riskNote } from './approval-note';
+import {
+  ActionButton,
+  errorText,
+  LoadFailed,
+  Loading,
+  Notice,
+  type NoticeTone,
+} from './request-parts';
+import { useMounted } from './mounted';
+import { haptic } from './haptics';
+import { useStrings, t } from './strings';
+import { useTheme } from './theme';
+
+const MONO = Platform.select({ ios: 'Menlo', default: 'monospace' });
+
+export interface ApprovalPort {
+  load(): Promise<ApprovalRequest>;
+  decide(outcome: ApprovalChoice): Promise<DecisionResult>;
+}
+
+type Phase =
+  | { kind: 'loading' }
+  | { kind: 'failed'; error: string }
+  | {
+      kind: 'ready';
+      request: ApprovalRequest;
+      busy?: ApprovalChoice;
+      notice?: { tone: NoticeTone; text: string };
+    };
+
+function settledNotice(request: ApprovalRequest): { tone: NoticeTone; text: string } | undefined {
+  if (request.status === 'expired') return { tone: 'warning', text: t.expired };
+  if (request.status === 'stopped') return { tone: 'warning', text: t.stopped };
+  if (request.status === 'decided')
+    return {
+      tone: 'warning',
+      text:
+        request.outcome === undefined
+          ? t.alreadyDecided
+          : t.alreadyDecidedAs(t.outcome[request.outcome]),
+    };
+  return undefined;
+}
+
+export function ApprovalView({
+  port,
+  botName,
+  listed = true,
+}: {
+  port: ApprovalPort;
+  botName: string;
+  listed?: boolean;
+}) {
+  const t = useStrings();
+  const theme = useTheme();
+  const [phase, setPhase] = useState<Phase>({ kind: 'loading' });
+  const own = useRef(false);
+  const current = useRef({ port, pending: false, active: false });
+  if (current.current.port !== port) current.current = { port, pending: false, active: false };
+  const submission = current.current;
+
+  const load = useCallback(async () => {
+    setPhase({ kind: 'loading' });
+    try {
+      const request = await port.load();
+      if (!submission.active || current.current !== submission) return;
+      const notice = settledNotice(request);
+      setPhase({ kind: 'ready', request, ...(notice === undefined ? {} : { notice }) });
+    } catch (error) {
+      if (!submission.active || current.current !== submission) return;
+      setPhase({ kind: 'failed', error: errorText(error) });
+    }
+  }, [port, submission]);
+
+  const seen = useRef<{ port: ApprovalPort; listed: boolean } | undefined>(undefined);
+  const mount = useMounted<ViewInstance>(() => {
+    submission.active = true;
+    const changed = seen.current?.port !== port;
+    const dropped = seen.current?.listed === true && !listed;
+    seen.current = { port, listed };
+    if (changed) own.current = false;
+    if (changed || (dropped && !own.current)) void load();
+    return () => {
+      submission.active = false;
+    };
+  }, [load, listed, port, submission]);
+
+  if (phase.kind !== 'ready')
+    return (
+      <View ref={mount} style={{ flex: 1 }}>
+        {phase.kind === 'loading' ? (
+          <Loading />
+        ) : (
+          <LoadFailed error={phase.error} onRetry={() => void load()} />
+        )}
+      </View>
+    );
+
+  const { request } = phase;
+  const decide = async (outcome: ApprovalChoice) => {
+    if (
+      submission.pending ||
+      !submission.active ||
+      current.current !== submission ||
+      request.status !== 'pending'
+    )
+      return;
+    submission.pending = true;
+    own.current = true;
+    setPhase({ kind: 'ready', request, busy: outcome });
+    try {
+      const result = await port.decide(outcome);
+      if (!submission.active || current.current !== submission) return;
+      if (result === 'accepted') {
+        haptic(outcome === 'rejected' ? 'deny' : 'approve');
+        setPhase({
+          kind: 'ready',
+          request: { ...request, status: 'decided', outcome },
+          notice: { tone: 'success', text: outcome === 'rejected' ? t.rejected : t.approved },
+        });
+        return;
+      }
+      const now = await port
+        .load()
+        .catch(() => ({ ...request, status: result }) as ApprovalRequest);
+      if (!submission.active || current.current !== submission) return;
+      setPhase({
+        kind: 'ready',
+        request: now,
+        notice: settledNotice(now.status === 'stopped' ? now : { ...now, status: result })!,
+      });
+    } catch (error) {
+      if (!submission.active || current.current !== submission) return;
+      submission.pending = false;
+      own.current = false;
+      setPhase({
+        kind: 'ready',
+        request,
+        notice: { tone: 'danger', text: `${t.decideFailed} ${errorText(error)}` },
+      });
+    }
+  };
+
+  return (
+    <View ref={mount} style={{ flex: 1 }}>
+      <ScrollView
+        contentInsetAdjustmentBehavior="automatic"
+        contentContainerStyle={{ padding: 16, gap: 16 }}
+        style={{ backgroundColor: theme.background }}
+      >
+        <Text style={{ color: theme.ink, fontSize: 22, fontWeight: '700' }}>
+          {t.wantsToRun(botName, request.toolName)}
+        </Text>
+        <View style={{ gap: 4 }}>
+          <Text style={{ color: theme.inkSoft, fontSize: 13, fontWeight: '600' }}>
+            {t.workingFolder}
+          </Text>
+          <Text selectable style={{ color: theme.ink, fontFamily: MONO, fontSize: 13 }}>
+            {request.cwd}
+          </Text>
+        </View>
+        <View style={{ gap: 8 }}>
+          <Text style={{ color: theme.inkSoft, fontSize: 13, fontWeight: '600' }}>
+            {t.arguments}
+          </Text>
+          {readableInput(request.input).map((row, index) => (
+            <View
+              key={`${row.label}-${index}`}
+              style={{
+                backgroundColor: theme.surface,
+                borderColor: theme.border,
+                borderWidth: 1,
+                borderRadius: 10,
+                padding: 12,
+                gap: 4,
+              }}
+            >
+              {row.label === '' ? null : (
+                <Text style={{ color: theme.inkSoft, fontSize: 13 }}>{row.label}</Text>
+              )}
+              <Text selectable style={{ color: theme.ink, fontFamily: MONO, fontSize: 14 }}>
+                {row.value}
+              </Text>
+            </View>
+          ))}
+        </View>
+        {phase.notice === undefined ? null : (
+          <Notice tone={phase.notice.tone}>{phase.notice.text}</Notice>
+        )}
+        {request.status === 'pending' ? (
+          <View style={{ gap: 12 }}>
+            {[
+              expiryLabel(request.expiresAt, Date.now()),
+              executionNote(request),
+              riskNote(request.toolName),
+              alwaysNote(request),
+            ].map((note) =>
+              note === undefined ? null : (
+                <Text key={note} style={{ color: theme.inkSoft, fontSize: 13 }}>
+                  {note}
+                </Text>
+              ),
+            )}
+            <ActionButton
+              label={t.allowOnce}
+              disabled={phase.busy !== undefined}
+              busy={phase.busy === 'allowed-once'}
+              onPress={() => void decide('allowed-once')}
+            />
+            <ActionButton
+              label={t.alwaysAllow}
+              tone="secondary"
+              disabled={phase.busy !== undefined || !request.allowAlways}
+              busy={phase.busy === 'allowed-always-tool'}
+              onPress={() => void decide('allowed-always-tool')}
+            />
+            <ActionButton
+              label={t.reject}
+              tone="danger"
+              disabled={phase.busy !== undefined}
+              busy={phase.busy === 'rejected'}
+              onPress={() => void decide('rejected')}
+            />
+          </View>
+        ) : null}
+      </ScrollView>
+    </View>
+  );
+}

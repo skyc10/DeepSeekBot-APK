@@ -1,0 +1,90 @@
+# Team mode: one Host, many Host Members
+
+Accepted target design, confirmed by the Human on 2026-11-13 after Q1–Q35; not a description of shipped behavior or completed acceptance. Normative decisions live in [ADR-0336](../adr/0336-hosts-have-members.md). Orthogonal to the [Environment panel design](environment-panel.md) (one Human, many Hosts). [中文](team-mode.zh.md).
+
+## Why
+
+A Tobs Host — an office computer or a VPS — can be used remotely by colleagues, each as an independent Host Member. Members keep private Bots, collaborate with other Humans and Bots in public Channels, and let shared Bots accumulate team context. Small teams get basic IM (messages and files) plus Bots as colleagues on hardware they control; one Host can isolate permissions and share AI compute and knowledge.
+
+## Decision log
+
+| #             | Decision                                                                                                                                                                                                                                    |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Q1            | Data model is always multi-member; `local-human` is the Host Owner. Team mode is a policy switch.                                                                                                                                           |
+| Q2            | The Host is the identity authority: local username/password, no Better Auth session layer, no Connect dependency.                                                                                                                           |
+| Q3            | Device grant = (device, Host, Human ID); one active identity per Host per Client; a member may sign in from phone and computer.                                                                                                             |
+| Q4            | Owner can view private content; every access is audited and members are told.                                                                                                                                                               |
+| Q5            | Owner is unique; other members hold roles from a fixed permission catalog (union); built-in Admin and Member.                                                                                                                               |
+| Q6            | Bots have an owner and visibility; a shared Bot has one Memory, disclosed when sharing.                                                                                                                                                     |
+| Q7            | Each member has their own private Tob acting with that member's authority.                                                                                                                                                                  |
+| Q8            | Separate spec and hub, parallel to Environment E1–E11; relationships stay Owner-scoped.                                                                                                                                                     |
+| Q9            | First delivery is permission isolation, not OS isolation.                                                                                                                                                                                   |
+| Q10, Q20      | Role Policy reuses Behavior permission items (Allow/Deny, Deny wins); advisory, not access control; "ask" deferred.                                                                                                                         |
+| Q11, Q21      | Bot visibility `private`/`roles`/`shared`; Channel visibility `public`/`roles`/`private` with Feishu-style Channel admin settings; audience containment.                                                                                    |
+| Q12           | Identity and credentials separate; OIDC later; no cross-Host directory sync.                                                                                                                                                                |
+| Q13, Q22, Q23 | Local Desktop/loopback/CLI act as Owner (optional password); LAN browsers sign in without installing anything; Gateway denies DSH-native methods to members; password sign-in needs HTTPS or the encrypted gateway.                         |
+| Q14           | Disabling Team mode suspends members and keeps data.                                                                                                                                                                                        |
+| Q15, Q16      | Invitation link/QR with fingerprint, out-of-band initial password, forced change; argon2id, rate limits, admin reset revokes all grants.                                                                                                    |
+| Q17           | Channel types stay `dm` and `group`; add Human–Human DM.                                                                                                                                                                                    |
+| Q18, Q24      | Approval cards stay in place, masked for non-approvers; fallback to Bot owner's Activity.                                                                                                                                                   |
+| Q19           | Activity, read state and push per Human ID; Source Events carry the speaking Human.                                                                                                                                                         |
+| Q25, Q30      | Personal and shared Workspace roots; refuse grants inside or above other members' roots, Memory repositories and the Host data directory; opaque approval by the opaque-tool permission (default Owner/Admin), dangerous preset Owner-only. |
+| Q26           | Bot–Bot DMs readable by participating Bots' owners and audited viewers.                                                                                                                                                                     |
+| Q27           | Member default: private Bots, Channels, Human DMs, configured models. Admin: all but private-content viewing and ownership transfer.                                                                                                        |
+| Q28           | Usage attributed per Human and Bot; role model allowlists; no quotas.                                                                                                                                                                       |
+| Q29           | Offboarding: deactivate → transfer → separately confirmed purge.                                                                                                                                                                            |
+| Q31, Q32      | Shared Bot management by owner or all-Bots managers; external IM binding needs ownership plus permission; external people never become members.                                                                                             |
+| Q33           | CLI groups `members`, `roles`, `devices --member`, Channel visibility/admin, `audit`, `team-mode`; local `--as <member>`.                                                                                                                   |
+| Q34           | Terms Host Member, Host Owner, Team mode.                                                                                                                                                                                                   |
+| Q35           | Slices M0–M11 below.                                                                                                                                                                                                                        |
+
+## Execution isolation (amended 2026-11-14)
+
+[Research](../research/2026-11-14-team-mode-execution-isolation.md) found that DSH's sandbox (`dsh-sandbox-local` + `dsh-bash-sandbox`) restricts writes only: bwrap mounts the host root read-only and the network is unrestricted. Under ADR-0205 a member Bot's `workspace-write` Shell runs without an approval card, so it can read other Bots' Memory, the database, the credential store and other spaces. DSH ships local backends only and has no single "Execution World Provider" service. `ctx.sandbox`, `ctx.fs`, `ctx.subprocess` and `ctx.shell` are separate replaceable providers, and `dsh-sandbox-local` accepts a custom `runnerCommand`.
+
+Settled scope:
+
+- Until M12, Team mode is a light **trial**. One plain notice says that member Bots can technically read other Bots' data on this Host. There is no per-call Shell approval. Member Bots never escalate or use `danger-full-access` (M5).
+- **M12** adds Linux execution confinement. A `runnerCommand` wrapper around DSH's bwrap hides `DSH_HOME`, the space roots and `/home`, and binds back only the Session's allowed roots (mirroring `currentRoots(session, kind)`). A network namespace denies loopback, link-local, private ranges and the tailnet. It fails closed without a resolvable Session. M12 is required before Team mode leaves the trial, because secrets stay on the Host.
+- Account spaces (`spaces/<humanId>`) and audience-scoped shared spaces (for example `shared/team`, `shared/finance`). Each space keeps Bot Memory (`bots/<slug>/memory`) apart from its grantable `files/` folder.
+- Not in scope: per-account quotas, macOS and Windows confinement (macOS Team Hosts keep the trial notice), deployment check scripts, microVMs, per-member OS users or containers. Highly sensitive data is best kept on a separate Host.
+
+## M3 Owner-transfer credential rule
+
+An Owner-transfer target must be active and have completed the forced password change on a credential issued by the **current Owner**. A credential issued by a member manager is ineligible even after that manager signs in and clears the forced-change flag. Existing credentials with unknown issuance provenance are also ineligible. The current Owner can establish eligibility by resetting the target's password, delivering the new one-time secret directly to the intended Human out of band, and having that Human complete the forced change before transfer.
+
+The Host records `ownerIssuerHumanId` in the canonical credential's password JSON when the Owner creates an account or resets its password. Member-manager creation leaves it absent. A self-service password change preserves this issuance provenance; it cannot manufacture Owner issuance. Issuance by a previous Owner is insufficient after a transfer. `owner-transfer-target-unverified` refuses a missing current-Owner issuer or an outstanding forced change. Transfer still verifies the caller's current password and protects the unique Owner.
+
+This rule trusts the current Owner's out-of-band delivery to the intended Human. It does not claim to prove that a Human never shares a password. Owner reset revokes earlier grants, and the first subsequent forced change revokes other grants, so a manager's old password or session cannot survive the recovery sequence. The rule reuses the credential record and existing reset/change APIs; it introduces no second credential store or new transfer payload.
+
+## Delivery
+
+| Slice | Behavior                                                                                                                                  | Blocked by |
+| ----- | ----------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
+| M0    | Explicit Human context through Host methods; remove hard-coded `local-human`; no behavior change                                          | —          |
+| M1    | Enable Team mode → Owner password → create member → LAN HTTPS sign-in → Tobs-only Client → join public Channel and exchange messages; CLI | M0         |
+| M2    | Private Bots, per-member Tob, per-member Activity and push; no Owner viewing of private content until M11                                 | M1         |
+| M3    | Roles, permission catalog, member and device management                                                                                   | M1         |
+| M4    | Channel visibility, Channel admin settings, Human–Human DM                                                                                | M3         |
+| M5    | Approval masking and routing, opaque-tool permission                                                                                      | M2, M3     |
+| M6    | Workspace roots, audience containment, grant refusals                                                                                     | M3         |
+| M7    | Bot visibility (shared/roles) and Role Policy                                                                                             | M4, M6     |
+| M8    | Mobile invitation, sign-in and self-pairing                                                                                               | M1         |
+| M9    | Password lifecycle, disabling Team mode, offboarding                                                                                      | M3         |
+| M10   | Usage per member, model allowlists                                                                                                        | M3         |
+| M11   | Private-content access audit and member notice                                                                                            | M3         |
+| M12   | Linux Bot execution confinement (hide other spaces and `DSH_HOME`, network namespace); ends the trial notice                              | M6         |
+
+Seek Human feedback after M1 before expanding.
+
+## M14 runtime: invitations and membership basis
+
+The 2026-11-15 amendment on spec #4137 supersedes the older Bot audience-containment text above for Channel invitations: there is no Bot co-occupancy refusal. Bot principal inheritance is delivered separately by M7.
+
+M14 stores `channel_human_members.membership_basis` per Channel/Human. `channelJoin` (including the older `publicChannelJoin`) records `role` for browse-and-join; `channelHumanAdd` records `invited` for a named invitation, including promotion of an existing role join. Repeating Join never downgrades an active invitation. Named invitations grant immediate access to private, role-restricted and public Channels regardless of the person's roles or Host permission rank. Removing a role closes only role-dependent memberships that no longer satisfy any allowed role; the role update and membership exit commit together. Restoring the role permits browsing again but does not silently rejoin. Visibility changes, role deletion and Owner-transfer role resets apply the same rule. Named access survives role changes until the person leaves or is removed. Channel creation and explicit ownership transfer establish named access too; transfer does not remove an outgoing active person's named membership.
+
+Application-defined Host bridge methods use the trusted explicit `HumanContext`, never an identity from the payload. `channelHumanAdd { channelId, humanId }` accepts a Human ID or username and returns `null`. `channelMemberCandidates { channelId, query?: string }` returns up to 100 `{ humanId, displayName, username: string | null }` records, sorted by display name and Human ID. Query defaults to empty and is limited to 200 characters; it matches display names and usernames. The picker excludes inactive people and current members. Both require the Host Owner, `channels.manageAll`, a joined Channel owner/admin, or a joined member when `addMembers` is `everyone`; other callers receive `permission-required` with `details.permission: 'addMembers'`. Unknown/non-Group Channels refuse `channel-not-found`; unknown/inactive invitees refuse `member-not-found`. Invalid wire inputs refuse `invalid-input`.
+
+The named `channel-membership-basis` migration is appended after `migration-ledger`. Historic invitation provenance is unavailable. To preserve the former role-revocation boundary, ordinary memberships in role-restricted Groups become `role`, with ineligible members marked left. The Host Owner, Channel owners/admins, DMs and memberships in public/private Groups become `invited`. This conservatively retains existing non-role access and all Owner data; it cannot recover which historic ordinary role-Channel members were invited by name. Re-inviting one by name establishes durable named access. Channel records, messages, read positions and membership history are retained across upgrade and restart.
+
+The existing shared SQL audience predicate governs lists, stream authorization, search and unread queries. Invitation writes publish through the existing membership change log; role revocation refreshes streams and invalidates list cursors. No new cache, timer, polling loop, dependency or Bot execution path is introduced. The additional basis predicate uses the existing membership primary key; a partial index bounds role-membership lookup by Human. Regression guards keep audience/browse checks at one database read independent of Channel count, bound candidate lookup reads and output to 100, and verify stream closure alongside search/list correctness. Runtime timing remains machine-specific; these structure guards do not claim an end-to-end speedup.

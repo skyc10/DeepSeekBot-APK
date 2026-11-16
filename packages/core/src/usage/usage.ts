@@ -1,0 +1,948 @@
+import {
+  queryOverviewUsage,
+  queryUsageByMember,
+  type UsageByMemberResult,
+  type UsageOverviewPeriod,
+  type UsageOverviewResult,
+} from './overview.js';
+import { z } from 'zod';
+import { createHmac } from 'node:crypto';
+import { queryUsage, usageFilterSchema, type UsageFilter, type UsageQueryResult } from './query.js';
+import type { DatabaseSync } from 'node:sqlite';
+
+import {
+  attachOperationalModule,
+  type OperationalDatabaseModulePort,
+  type OperationalDatabaseOwner,
+} from '../database/owner.js';
+import type { IdleCompactionRecord } from '../runtime/idle-compaction.js';
+import type { SessionOwnership, SessionOwnershipRecord } from '../sessions/ownership.js';
+import type { DshSessionEvent } from '../sessions/source.js';
+import { queryTokenUsageDays, type UsageTelemetrySnapshot } from './telemetry.js';
+
+export interface UsageDayRow {
+  day: string;
+  purpose: string;
+  provider: string;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  totalTokens?: number | null;
+  reportedTotalTokens?: number;
+  unknownBuckets?: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheWriteTokens: number;
+  };
+}
+
+export interface UsageRebuildReport {
+  folded: number;
+
+  failed: number;
+
+  legacyBaselineBots?: number;
+}
+
+export interface DshUsageSessionLog {
+  events: readonly DshSessionEvent[];
+  inheritedEventCount: number;
+}
+
+export type DshUsageSessionLogReader = (
+  sessionId: string,
+) => Promise<DshUsageSessionLog | undefined>;
+
+export interface SessionUsageSummary {
+  totalTokens: number | null;
+  status: 'ready' | 'unknown' | 'partial' | 'unavailable';
+}
+
+export interface UsageProjection {
+  telemetrySnapshot(): UsageTelemetrySnapshot | undefined;
+
+  handleSessionEvent(sessionId: string, event: DshSessionEvent): void;
+
+  primeSession(sessionId: string, events: readonly DshSessionEvent[]): void;
+
+  bindParentTurn(sessionId: string, parentSessionId: string): void;
+
+  latestRoute(
+    sessionId: string,
+  ): { provider: string; model: string; reasoningEffort?: string } | undefined;
+
+  rebuild(
+    sessionIds: readonly string[],
+    readLog: DshUsageSessionLogReader,
+  ): Promise<UsageRebuildReport>;
+
+  activity(botSlug: string, sinceIso: string): UsageDayRow[];
+
+  query(botSlug: string, filter: UsageFilter): UsageQueryResult;
+
+  sessionSummary(
+    botSlug: string,
+    sessionId: string,
+    sinceIso: string,
+    readLog: DshUsageSessionLogReader,
+  ): Promise<SessionUsageSummary>;
+
+  overview(
+    period: UsageOverviewPeriod,
+    after?: string,
+    botSlugs?: readonly string[],
+  ): UsageOverviewResult;
+
+  byMember(
+    period: UsageOverviewPeriod,
+    ownerId: string,
+    botName: (slug: string) => string,
+  ): UsageByMemberResult;
+
+  purgeBot(botSlug: string, removeFiles?: () => void): void;
+
+  recordIdleCompaction(record: IdleCompactionRecord): void;
+
+  idleCompactions(botSlug: string, sinceIso: string): IdleCompactionRecord[];
+}
+
+interface UsageDailyDbRow {
+  day: string;
+  purpose: string;
+  provider: string;
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  unknown_input: number;
+  unknown_output: number;
+  unknown_cache_read: number;
+  unknown_cache_write: number;
+  total_tokens: number;
+  unknown_total: number;
+}
+
+export function usageLocalDay(timeMs: number): string {
+  const date = new Date(timeMs);
+  const month = `${date.getMonth() + 1}`.padStart(2, '0');
+  const day = `${date.getDate()}`.padStart(2, '0');
+  return `${date.getFullYear()}-${month}-${day}`;
+}
+
+function purposeOf(owner: { rootRole: string; provenance: string }): string {
+  return owner.provenance === 'subagent' ? 'subagent' : owner.rootRole;
+}
+
+function recordOf(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function reportedBuckets(event: DshSessionEvent): {
+  uncachedInputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  totalTokens?: number;
+} {
+  const data = recordOf(event.data);
+  const stream = Array.isArray(data?.['stream']) ? data['stream'] : [];
+  const last = stream.findLast(
+    (entry) => recordOf(recordOf(entry)?.['chunk'])?.['type'] === 'usage',
+  );
+  const sample = recordOf(data?.['usage'] ?? recordOf(recordOf(last)?.['chunk'])?.['usage']);
+  const count = (key: string): number | undefined => {
+    const value = sample?.[key];
+    return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+      ? value
+      : undefined;
+  };
+  const buckets: Partial<
+    Record<
+      | 'uncachedInputTokens'
+      | 'outputTokens'
+      | 'cacheReadTokens'
+      | 'cacheWriteTokens'
+      | 'totalTokens',
+      number
+    >
+  > = {};
+  for (const [key, source] of [
+    ['uncachedInputTokens', 'inputTokens'],
+    ['outputTokens', 'outputTokens'],
+    ['cacheReadTokens', 'cacheReadTokens'],
+    ['cacheWriteTokens', 'cacheWriteTokens'],
+    ['totalTokens', 'totalTokens'],
+  ] as const) {
+    const value = count(source);
+    if (value !== undefined) buckets[key] = value;
+  }
+  const known = [
+    buckets.uncachedInputTokens,
+    buckets.outputTokens,
+    buckets.cacheReadTokens,
+    buckets.cacheWriteTokens,
+  ];
+  const sum = known.reduce<number>((total, value) => total + (value ?? 0), 0);
+  if (
+    buckets.totalTokens !== undefined &&
+    (buckets.totalTokens < sum ||
+      (known.every((value) => value !== undefined) && buckets.totalTokens !== sum))
+  )
+    delete buckets.totalTokens;
+  if (
+    sample?.['totalTokens'] === undefined &&
+    known.every((value) => value !== undefined) &&
+    Number.isSafeInteger(sum)
+  )
+    buckets.totalTokens = sum;
+  const missing = (
+    ['uncachedInputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens'] as const
+  ).filter((key) => buckets[key] === undefined);
+  if (buckets.totalTokens !== undefined && missing.length > 0) {
+    const rest = buckets.totalTokens - sum;
+    if (missing.length === 1) buckets[missing[0]!] = rest;
+    else if (rest === 0) for (const key of missing) buckets[key] = 0;
+  }
+  return buckets;
+}
+
+interface UsageRoute {
+  provider: string;
+  model: string;
+  reasoningEffort?: string;
+}
+
+interface UsageFoldEvent {
+  turn: number | undefined;
+  seq: number;
+  time: number;
+  source: UsageRoute | undefined;
+  buckets: ReturnType<typeof reportedBuckets>;
+}
+
+function projectUsageEvent(event: DshSessionEvent): UsageFoldEvent | undefined {
+  if (event.type !== 'assistant/message' && event.type !== 'assistant/attempt') return undefined;
+  if (event.surfaceOp !== undefined && event.surfaceOp !== 'append') return undefined;
+  if (event.seq === undefined || !Number.isSafeInteger(event.seq) || event.seq < 0)
+    return undefined;
+  const turn = recordOf(event.data)?.['turn'];
+  return {
+    seq: event.seq,
+    time: event.time,
+    turn: typeof turn === 'number' && Number.isSafeInteger(turn) ? turn : undefined,
+    source: routeOf(recordOf(recordOf(event.data)?.['message'])?.['source']),
+    buckets: reportedBuckets(event),
+  };
+}
+
+function routeOf(value: unknown): UsageRoute | undefined {
+  const record = recordOf(value);
+  return typeof record?.['provider'] === 'string' &&
+    record['provider'].length > 0 &&
+    typeof record['model'] === 'string' &&
+    record['model'].length > 0
+    ? {
+        provider: record['provider'],
+        model: record['model'],
+        ...(typeof record['reasoningEffort'] === 'string' && record['reasoningEffort'].length > 0
+          ? { reasoningEffort: record['reasoningEffort'] }
+          : {}),
+      }
+    : undefined;
+}
+
+function requestRoute(event: DshSessionEvent): UsageRoute | undefined {
+  if (event.type === 'request/context') return routeOf(event.data);
+  if (event.type === 'request/header')
+    return routeOf(recordOf(recordOf(event.data)?.['header'])?.['config']);
+  return undefined;
+}
+
+function routeIndex(history: ReadonlyArray<readonly [number, UsageRoute]>, seq: number): number {
+  let low = 0;
+  let high = history.length;
+  while (low < high) {
+    const middle = (low + high) >> 1;
+    if (history[middle]![0] <= seq) low = middle + 1;
+    else high = middle;
+  }
+  return low - 1;
+}
+
+export function createUsageProjection(options: {
+  ownership: SessionOwnership;
+  database: OperationalDatabaseOwner;
+  now?: () => Date;
+  botOwner?: (botSlug: string) => string;
+  ownerHumanId?: () => string;
+  botCreatedAt?: (botSlug: string) => string | undefined;
+}): UsageProjection {
+  const database: OperationalDatabaseModulePort = attachOperationalModule(
+    options.database,
+    'usage',
+  );
+  const { ownership } = options;
+  const hostOwner = (): string =>
+    options.ownerHumanId?.() ??
+    database.read(
+      (db) =>
+        z
+          .object({ owner_human_id: z.string() })
+          .parse(db.prepare('SELECT owner_human_id FROM team_settings WHERE singleton = 1').get())
+          .owner_human_id,
+    );
+
+  const humanAt = (connection: DatabaseSync, sessionId: string, at: number, turn?: number) =>
+    z
+      .object({ human_id: z.string() })
+      .optional()
+      .parse(
+        connection
+          .prepare(
+            'SELECT human_id FROM usage_turn_humans WHERE session_id = ? AND turn >= 0 AND at_ms <= ? AND (? IS NULL OR turn = ?) ORDER BY at_ms DESC, turn DESC LIMIT 1',
+          )
+          .get(sessionId, at, turn ?? null, turn ?? null),
+      )?.human_id;
+  const descendantCreator = (
+    connection: DatabaseSync,
+    owner: SessionOwnershipRecord,
+    seen = new Set<string>(),
+  ): string | undefined => {
+    if (!owner.parentSessionId || seen.has(owner.sessionId)) return undefined;
+    seen.add(owner.sessionId);
+    const existing = humanAt(connection, owner.sessionId, Number.MAX_SAFE_INTEGER, 0);
+    if (existing) return existing;
+    const parent = ownership.resolve(owner.parentSessionId);
+    if (!parent || parent.botSlug !== owner.botSlug) return undefined;
+    const at = Date.parse(owner.createdAt);
+    if (!Number.isFinite(at)) return undefined;
+    const humanId =
+      humanAt(connection, parent.sessionId, at) ?? descendantCreator(connection, parent, seen);
+    if (humanId)
+      connection
+        .prepare('INSERT OR IGNORE INTO usage_turn_humans VALUES (?, 0, ?, ?)')
+        .run(owner.sessionId, humanId, at);
+    return humanId;
+  };
+  const routes = new Map<string, Array<[number, UsageRoute]>>();
+  const fingerprintKey = database.read((connection) =>
+    connection.prepare('SELECT fingerprint_key FROM usage_receipt_state WHERE singleton = 1').get(),
+  ) as { fingerprint_key: string };
+  const legacyBaselines = database.read((connection) =>
+    connection.prepare('SELECT bot_slug, through_ms FROM usage_legacy_baselines').all(),
+  ) as Array<{ bot_slug: string; through_ms: number }>;
+  const baselineByBot = new Map(legacyBaselines.map((row) => [row.bot_slug, row.through_ms]));
+  let rebuilding = false;
+  let reconciliationFailed = false;
+  let reconciledAt: string | null = null;
+  const queuedEvents: Array<{ sessionId: string; event: UsageFoldEvent; route?: UsageRoute }> = [];
+
+  const upsert = (
+    connection: DatabaseSync,
+    botSlug: string,
+    day: string,
+    purpose: string,
+    provider: string,
+    model: string,
+    humanId: string,
+    usage: {
+      uncachedInputTokens?: number;
+      outputTokens?: number;
+      cacheReadTokens?: number;
+      cacheWriteTokens?: number;
+      totalTokens?: number;
+    },
+  ): void => {
+    connection
+      .prepare(
+        `INSERT INTO usage_daily
+           (bot_slug, day, provider, model, purpose,
+            input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+            unknown_input, unknown_output, unknown_cache_read, unknown_cache_write, total_tokens, unknown_total, human_id, legacy)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+         ON CONFLICT (bot_slug, day, provider, model, purpose, human_id, legacy) DO UPDATE SET
+           input_tokens = input_tokens + excluded.input_tokens,
+           output_tokens = output_tokens + excluded.output_tokens,
+           cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens,
+           cache_write_tokens = cache_write_tokens + excluded.cache_write_tokens,
+           unknown_input = unknown_input + excluded.unknown_input,
+           unknown_output = unknown_output + excluded.unknown_output,
+           unknown_cache_read = unknown_cache_read + excluded.unknown_cache_read,
+           unknown_cache_write = unknown_cache_write + excluded.unknown_cache_write,
+           total_tokens = total_tokens + excluded.total_tokens,
+           unknown_total = unknown_total + excluded.unknown_total`,
+      )
+      .run(
+        botSlug,
+        day,
+        provider,
+        model,
+        purpose,
+        usage.uncachedInputTokens ?? 0,
+        usage.outputTokens ?? 0,
+        usage.cacheReadTokens ?? 0,
+        usage.cacheWriteTokens ?? 0,
+        usage.uncachedInputTokens === undefined ? 1 : 0,
+        usage.outputTokens === undefined ? 1 : 0,
+        usage.cacheReadTokens === undefined ? 1 : 0,
+        usage.cacheWriteTokens === undefined ? 1 : 0,
+        usage.totalTokens ?? 0,
+        usage.totalTokens === undefined ? 1 : 0,
+        humanId,
+      );
+  };
+
+  const foldEvent = (
+    sessionId: string,
+    event: UsageFoldEvent,
+    route: UsageRoute | undefined,
+    connection: DatabaseSync,
+  ): boolean => {
+    const owner = ownership.resolve(sessionId);
+    if (owner === undefined) return false;
+    let root = owner;
+    const lineage = new Set<string>();
+    while (root.parentSessionId !== undefined) {
+      if (lineage.has(root.sessionId)) return false;
+      lineage.add(root.sessionId);
+      const parent = ownership.resolve(root.parentSessionId);
+      if (parent === undefined || parent.botSlug !== owner.botSlug) return false;
+      root = parent;
+    }
+    const rootFingerprint = createHmac('sha256', fingerprintKey.fingerprint_key)
+      .update(JSON.stringify([root.sessionId]))
+      .digest('hex');
+    if (
+      connection
+        .prepare('SELECT 1 FROM usage_retired_roots WHERE fingerprint = ?')
+        .get(rootFingerprint) !== undefined
+    )
+      return false;
+    if (options.botCreatedAt !== undefined) {
+      const createdAt = options.botCreatedAt(owner.botSlug);
+      if (createdAt === undefined || Date.parse(root.createdAt) < Date.parse(createdAt))
+        return false;
+    }
+    const fingerprint = createHmac('sha256', fingerprintKey.fingerprint_key)
+      .update(JSON.stringify([sessionId, event.seq]))
+      .digest('hex');
+    const humanId =
+      humanAt(connection, sessionId, event.time, event.turn) ??
+      (owner.parentSessionId ? descendantCreator(connection, owner) : undefined) ??
+      options.botOwner?.(owner.botSlug) ??
+      hostOwner();
+    const receipt = connection
+      .prepare(
+        'INSERT OR IGNORE INTO usage_receipts (fingerprint, bot_slug, human_id) VALUES (?, ?, ?)',
+      )
+      .run(fingerprint, owner.botSlug, humanId);
+    if (receipt.changes === 0) return false;
+    const baseline = baselineByBot.get(owner.botSlug);
+    if (baseline !== undefined && event.time <= baseline) return false;
+    const actual = event.source ?? route ?? { provider: 'unknown', model: 'unknown' };
+    upsert(
+      connection,
+      owner.botSlug,
+      usageLocalDay(event.time),
+      purposeOf(owner),
+      actual.provider,
+      actual.model,
+      humanId,
+      event.buckets,
+    );
+    return true;
+  };
+
+  const observe = (sessionId: string, event: DshSessionEvent): UsageRoute | undefined => {
+    if (event.seq === undefined || !Number.isSafeInteger(event.seq) || event.seq < 0)
+      return undefined;
+    const route = requestRoute(event);
+    let history = routes.get(sessionId);
+    if (route !== undefined) {
+      if (history === undefined) {
+        history = [];
+        routes.set(sessionId, history);
+      }
+      const at = routeIndex(history, event.seq);
+      if (history[at]?.[0] === event.seq) history[at] = [event.seq, route];
+      else history.splice(at + 1, 0, [event.seq, route]);
+    }
+    return history === undefined ? undefined : history[routeIndex(history, event.seq)]?.[1];
+  };
+
+  const writeLive = (
+    sessionId: string,
+    event: UsageFoldEvent,
+    route: UsageRoute | undefined,
+  ): void => {
+    database.transaction((connection) => foldEvent(sessionId, event, route, connection), ['usage']);
+  };
+
+  return {
+    telemetrySnapshot() {
+      if (rebuilding || reconciledAt === null) return undefined;
+      return {
+        days: database.read((connection) =>
+          queryTokenUsageDays(connection, options.now?.() ?? new Date()),
+        ),
+        isReconciled: !reconciliationFailed,
+      };
+    },
+    async sessionSummary(botSlug, sessionId, sinceIso, readLog) {
+      const root = ownership.resolve(sessionId);
+      const available = (): boolean => {
+        if (root === undefined || root.botSlug !== botSlug || root.parentSessionId !== undefined)
+          return false;
+        if (!ownership.contentAvailable(sessionId)) return false;
+        const current = ownership.resolve(sessionId);
+        if (current?.botSlug !== botSlug || current.createdAt !== root.createdAt) return false;
+        const createdAt = options.botCreatedAt?.(botSlug);
+        if (
+          options.botCreatedAt !== undefined &&
+          (createdAt === undefined || Date.parse(root.createdAt) < Date.parse(createdAt))
+        )
+          return false;
+        const fingerprint = createHmac('sha256', fingerprintKey.fingerprint_key)
+          .update(JSON.stringify([sessionId]))
+          .digest('hex');
+        return database.read(
+          (connection) =>
+            connection
+              .prepare('SELECT 1 FROM usage_retired_roots WHERE fingerprint = ?')
+              .get(fingerprint) === undefined,
+        );
+      };
+      if (!available()) return { totalTokens: null, status: 'unavailable' };
+      const descendants = ownership.descendantsOf(sessionId);
+      const sessions = [root!, ...descendants.slice(0, 20)];
+      let incomplete = descendants.length > 20;
+      let unknown = false;
+      let known = false;
+      let totalTokens = 0;
+      const sinceDay = usageLocalDay(Date.parse(sinceIso));
+      const today = usageLocalDay((options.now?.() ?? new Date()).getTime());
+      for (const session of sessions) {
+        if (session.botSlug !== botSlug || !ownership.contentAvailable(session.sessionId)) {
+          incomplete = true;
+          continue;
+        }
+        let log: DshUsageSessionLog | undefined;
+        try {
+          log = await readLog(session.sessionId);
+        } catch {
+          incomplete = true;
+        }
+        if (log === undefined) {
+          incomplete = true;
+          continue;
+        }
+        if (
+          !Number.isSafeInteger(log.inheritedEventCount) ||
+          log.inheritedEventCount < 0 ||
+          log.inheritedEventCount > log.events.length ||
+          !ownership.contentAvailable(session.sessionId) ||
+          ownership.resolve(session.sessionId)?.botSlug !== botSlug
+        ) {
+          incomplete = true;
+          continue;
+        }
+        const seen = new Set<number>();
+        for (const event of log.events.slice(log.inheritedEventCount)) {
+          if (event.type !== 'assistant/message' && event.type !== 'assistant/attempt') continue;
+          if (event.surfaceOp !== undefined && event.surfaceOp !== 'append') continue;
+          if (
+            event.seq === undefined ||
+            !Number.isSafeInteger(event.seq) ||
+            event.seq < 0 ||
+            seen.has(event.seq)
+          )
+            continue;
+          seen.add(event.seq);
+          if (!Number.isFinite(event.time)) continue;
+          const day = usageLocalDay(event.time);
+          if (day < sinceDay || day > today) continue;
+          const baseline = baselineByBot.get(botSlug);
+          if (baseline !== undefined && event.time <= baseline) {
+            incomplete = true;
+            continue;
+          }
+          const total = reportedBuckets(event).totalTokens;
+          if (total === undefined) unknown = true;
+          else {
+            known = true;
+            totalTokens += total;
+          }
+        }
+      }
+      if (!available()) return { totalTokens: null, status: 'unavailable' };
+      if (!Number.isSafeInteger(totalTokens)) return { totalTokens: null, status: 'unknown' };
+      if ((unknown || incomplete) && !known)
+        return { totalTokens: null, status: incomplete ? 'unavailable' : 'unknown' };
+      return { totalTokens, status: unknown || incomplete ? 'partial' : 'ready' };
+    },
+    bindParentTurn(sessionId, parentSessionId) {
+      const owner = ownership.resolve(sessionId);
+      const parent = ownership.resolve(parentSessionId);
+      if (
+        !owner ||
+        !parent ||
+        owner.parentSessionId !== parentSessionId ||
+        owner.botSlug !== parent.botSlug
+      )
+        return;
+      database.transaction(
+        (connection) => {
+          const humanId =
+            humanAt(connection, parentSessionId, Number.MAX_SAFE_INTEGER) ??
+            options.botOwner?.(owner.botSlug) ??
+            hostOwner();
+          const at = (options.now?.() ?? new Date()).getTime();
+          connection
+            .prepare('INSERT OR IGNORE INTO usage_turn_humans VALUES (?, 0, ?, ?)')
+            .run(sessionId, humanId, at);
+          connection
+            .prepare('INSERT OR REPLACE INTO usage_turn_humans VALUES (?, -1, ?, ?)')
+            .run(sessionId, humanId, at);
+        },
+        ['usage'],
+      );
+    },
+    primeSession(sessionId, events) {
+      const owner = ownership.resolve(sessionId);
+      if (owner?.parentSessionId)
+        database.transaction((connection) => descendantCreator(connection, owner), ['usage']);
+      for (const event of events) observe(sessionId, event);
+    },
+    latestRoute(sessionId) {
+      const ordered = routes.get(sessionId) ?? [];
+      const resolved = ordered.at(-1)?.[1];
+      if (resolved === undefined) return undefined;
+      const effort =
+        resolved.reasoningEffort ??
+        ordered.findLast(
+          ([, route]) =>
+            route.provider === resolved.provider &&
+            route.model === resolved.model &&
+            route.reasoningEffort !== undefined,
+        )?.[1].reasoningEffort;
+      return {
+        provider: resolved.provider,
+        model: resolved.model,
+        ...(effort === undefined ? {} : { reasoningEffort: effort }),
+      };
+    },
+    handleSessionEvent(sessionId, event) {
+      if (event.type === 'turn/start') {
+        const turn = recordOf(event.data)?.['turn'];
+        const owner = ownership.resolve(sessionId);
+        if (owner && typeof turn === 'number' && Number.isSafeInteger(turn))
+          database.transaction(
+            (db) => {
+              const pending = z
+                .object({ human_id: z.string() })
+                .optional()
+                .parse(
+                  db
+                    .prepare(
+                      'SELECT human_id FROM usage_turn_humans WHERE session_id = ? AND turn = -1',
+                    )
+                    .get(sessionId),
+                );
+              const previous =
+                !pending && owner.parentSessionId
+                  ? z
+                      .object({ human_id: z.string() })
+                      .optional()
+                      .parse(
+                        db
+                          .prepare(
+                            'SELECT human_id FROM usage_turn_humans WHERE session_id = ? AND turn > 0 AND turn < ? AND at_ms <= ? ORDER BY turn DESC LIMIT 1',
+                          )
+                          .get(sessionId, turn, event.time),
+                      )
+                  : undefined;
+              const inherited =
+                !pending && !previous && owner.parentSessionId
+                  ? descendantCreator(db, owner)
+                  : undefined;
+              const creator =
+                owner.rootRole === 'assignment'
+                  ? z
+                      .object({ human_id: z.string() })
+                      .optional()
+                      .parse(
+                        db
+                          .prepare(
+                            'SELECT human_id FROM usage_turn_humans WHERE session_id = ? AND turn = 0',
+                          )
+                          .get(sessionId),
+                      )
+                  : undefined;
+              const humanId =
+                pending?.human_id ??
+                previous?.human_id ??
+                creator?.human_id ??
+                inherited ??
+                options.botOwner?.(owner.botSlug) ??
+                hostOwner();
+              db.prepare('INSERT OR IGNORE INTO usage_turn_humans VALUES (?, ?, ?, ?)').run(
+                sessionId,
+                turn,
+                humanId,
+                event.time,
+              );
+              db.prepare('DELETE FROM usage_turn_humans WHERE session_id = ? AND turn = -1').run(
+                sessionId,
+              );
+            },
+            ['usage'],
+          );
+      }
+      const route = observe(sessionId, event);
+      const projected = projectUsageEvent(event);
+      if (projected === undefined) return;
+      if (rebuilding) {
+        queuedEvents.push({
+          sessionId,
+          event: projected,
+          ...(route === undefined ? {} : { route }),
+        });
+        return;
+      }
+      writeLive(sessionId, projected, route);
+    },
+    async rebuild(sessionIds, readLog) {
+      if (rebuilding) throw new Error('Usage reconciliation already running');
+      rebuilding = true;
+      reconciliationFailed = true;
+      let folded = 0;
+      let failed = 0;
+      try {
+        const logs = new Map<
+          string,
+          Array<{ event: UsageFoldEvent; route: UsageRoute | undefined }>
+        >();
+        for (const sessionId of sessionIds) {
+          if (ownership.resolve(sessionId) === undefined) continue;
+          let log: DshUsageSessionLog | undefined;
+          try {
+            log = await readLog(sessionId);
+          } catch {
+            failed += 1;
+            continue;
+          }
+          if (log === undefined) {
+            failed += 1;
+            continue;
+          }
+          const projected: Array<{ event: UsageFoldEvent; route: UsageRoute | undefined }> = [];
+          let route: UsageRoute | undefined;
+          for (let index = 0; index < log.events.length; index += 1) {
+            const event = log.events[index]!;
+            route = requestRoute(event) ?? route;
+            if (index < log.inheritedEventCount) continue;
+            const usageEvent = projectUsageEvent(event);
+            if (usageEvent !== undefined) projected.push({ event: usageEvent, route });
+          }
+          logs.set(sessionId, projected);
+        }
+        database.transaction(
+          (connection) => {
+            for (const [sessionId, events] of logs) {
+              for (const { event, route } of events) {
+                if (foldEvent(sessionId, event, route, connection)) folded += 1;
+              }
+            }
+            for (const queued of queuedEvents)
+              if (foldEvent(queued.sessionId, queued.event, queued.route, connection)) folded += 1;
+          },
+          ['usage'],
+        );
+      } finally {
+        rebuilding = false;
+        const pending = queuedEvents.splice(0);
+        for (const queued of pending) writeLive(queued.sessionId, queued.event, queued.route);
+      }
+      reconciliationFailed = failed > 0;
+      reconciledAt = (options.now?.() ?? new Date()).toISOString();
+      return {
+        folded,
+        failed,
+        ...(baselineByBot.size > 0 ? { legacyBaselineBots: baselineByBot.size } : {}),
+      };
+    },
+    query(botSlug, filter) {
+      const parsed = usageFilterSchema.parse(filter);
+      if (parsed.end > usageLocalDay((options.now?.() ?? new Date()).getTime()))
+        throw new RangeError('Usage range cannot include future days');
+      return database.read((connection) =>
+        queryUsage(connection, botSlug, parsed, {
+          freshness: rebuilding ? 'reconciling' : reconciliationFailed ? 'degraded' : 'ready',
+          readAt: (options.now?.() ?? new Date()).toISOString(),
+          reconciledAt,
+        }),
+      );
+    },
+    byMember(period, ownerId, botName) {
+      return database.read((db) =>
+        queryUsageByMember(db, period, options.now?.() ?? new Date(), ownerId, botName),
+      );
+    },
+    overview(period, after, botSlugs) {
+      return database.read((connection) =>
+        queryOverviewUsage(
+          connection,
+          period,
+          after,
+          options.now?.() ?? new Date(),
+          {
+            freshness: rebuilding ? 'reconciling' : reconciliationFailed ? 'degraded' : 'ready',
+            reconciledAt,
+          },
+          botSlugs,
+        ),
+      );
+    },
+    purgeBot(botSlug, removeFiles) {
+      database.transaction(
+        (connection) => {
+          const retire = connection.prepare(
+            'INSERT OR IGNORE INTO usage_retired_roots (fingerprint) VALUES (?)',
+          );
+          for (const owner of ownership.list().filter((record) => record.botSlug === botSlug)) {
+            retire.run(
+              createHmac('sha256', fingerprintKey.fingerprint_key)
+                .update(JSON.stringify([owner.sessionId]))
+                .digest('hex'),
+            );
+          }
+          connection.prepare('DELETE FROM usage_daily WHERE bot_slug = ?').run(botSlug);
+          connection.prepare('DELETE FROM usage_receipts WHERE bot_slug = ?').run(botSlug);
+          connection.prepare('DELETE FROM usage_legacy_baselines WHERE bot_slug = ?').run(botSlug);
+          connection.prepare('DELETE FROM usage_idle_compactions WHERE bot_slug = ?').run(botSlug);
+          removeFiles?.();
+        },
+        ['usage'],
+      );
+      baselineByBot.delete(botSlug);
+    },
+    recordIdleCompaction(record) {
+      database.transaction(
+        (connection) => {
+          connection
+            .prepare(
+              `INSERT INTO usage_idle_compactions
+                 (bot_slug, at, provider, model, idle_gap_ms, cache_lifetime_ms, cache_lifetime_source,
+                  tokens_before, tokens_after, outcome, error, input_tokens, cache_read_tokens, output_tokens, human_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            )
+            .run(
+              record.botSlug,
+              record.at,
+              record.provider,
+              record.model,
+              Math.round(record.idleGapMs),
+              Math.round(record.cacheLifetimeMs),
+              record.cacheLifetimeSource,
+              record.tokensBefore,
+              record.tokensAfter,
+              record.outcome,
+              record.error ?? null,
+              record.inputTokens,
+              record.cacheReadTokens,
+              record.outputTokens,
+              options.botOwner?.(record.botSlug) ?? hostOwner(),
+            );
+        },
+        ['usage'],
+      );
+    },
+    idleCompactions(botSlug, sinceIso) {
+      const rows = database.read((connection) =>
+        connection
+          .prepare(
+            `SELECT bot_slug, at, provider, model, idle_gap_ms, cache_lifetime_ms, cache_lifetime_source,
+                    tokens_before, tokens_after, outcome, error, input_tokens, cache_read_tokens, output_tokens
+               FROM usage_idle_compactions
+              WHERE bot_slug = ? AND at >= ?
+              ORDER BY at`,
+          )
+          .all(botSlug, sinceIso),
+      ) as Array<Record<string, unknown>>;
+      return rows.map((row) => ({
+        botSlug: row['bot_slug'] as string,
+        at: row['at'] as string,
+        provider: row['provider'] as string,
+        model: row['model'] as string,
+        idleGapMs: row['idle_gap_ms'] as number,
+        cacheLifetimeMs: row['cache_lifetime_ms'] as number,
+        cacheLifetimeSource: row[
+          'cache_lifetime_source'
+        ] as IdleCompactionRecord['cacheLifetimeSource'],
+        tokensBefore: row['tokens_before'] as number,
+        tokensAfter: (row['tokens_after'] as number | null) ?? null,
+        outcome: row['outcome'] as IdleCompactionRecord['outcome'],
+        ...(typeof row['error'] === 'string' ? { error: row['error'] } : {}),
+        inputTokens: (row['input_tokens'] as number | null) ?? null,
+        cacheReadTokens: (row['cache_read_tokens'] as number | null) ?? null,
+        outputTokens: (row['output_tokens'] as number | null) ?? null,
+      }));
+    },
+    activity(botSlug, sinceIso) {
+      const sinceDay = usageLocalDay(Date.parse(sinceIso));
+      const rows = database.read((connection) =>
+        connection
+          .prepare(
+            `SELECT day, purpose, provider, model, SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens, SUM(cache_read_tokens) AS cache_read_tokens, SUM(cache_write_tokens) AS cache_write_tokens, SUM(unknown_input) AS unknown_input, SUM(unknown_output) AS unknown_output, SUM(unknown_cache_read) AS unknown_cache_read, SUM(unknown_cache_write) AS unknown_cache_write, SUM(total_tokens) AS total_tokens, SUM(unknown_total) AS unknown_total
+               FROM usage_daily
+              WHERE bot_slug = ? AND day >= ?
+              GROUP BY day, purpose, provider, model ORDER BY day`,
+          )
+          .all(botSlug, sinceDay),
+      ) as unknown as UsageDailyDbRow[];
+      return rows.map((row) => ({
+        day: row.day,
+        purpose: row.purpose,
+        provider: row.provider,
+        model: row.model,
+        inputTokens: row.input_tokens,
+        outputTokens: row.output_tokens,
+        cacheReadTokens: row.cache_read_tokens,
+        cacheWriteTokens: row.cache_write_tokens,
+        totalTokens: row.unknown_total > 0 ? null : row.total_tokens,
+        ...(row.unknown_total > 0
+          ? {
+              reportedTotalTokens: Math.max(
+                row.total_tokens,
+                row.input_tokens +
+                  row.output_tokens +
+                  row.cache_read_tokens +
+                  row.cache_write_tokens,
+              ),
+            }
+          : {}),
+        ...([
+          row.unknown_input,
+          row.unknown_output,
+          row.unknown_cache_read,
+          row.unknown_cache_write,
+        ].some((count) => count > 0)
+          ? {
+              unknownBuckets: {
+                inputTokens: row.unknown_input,
+                outputTokens: row.unknown_output,
+                cacheReadTokens: row.unknown_cache_read,
+                cacheWriteTokens: row.unknown_cache_write,
+              },
+            }
+          : {}),
+      }));
+    },
+  };
+}

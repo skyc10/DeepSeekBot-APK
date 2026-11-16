@@ -1,0 +1,27 @@
+export interface DshSessionEvent {
+  type: string;
+  seq?: number;
+  surfaceOp?: unknown;
+  time: number;
+  data: unknown;
+}
+
+export interface DshSessionHeader {
+  cwd?: string;
+  createdAt: number;
+
+  parentSession?: string;
+
+  origin?: 'subagent';
+}
+
+export interface DshSession {
+  id: string;
+  header: DshSessionHeader;
+  snapshotEvents(): readonly DshSessionEvent[];
+}
+
+export interface DshSessionStore {
+  get(sessionId: string): DshSession | undefined;
+  list(): readonly DshSession[];
+}

@@ -1,0 +1,630 @@
+import type { PixelSymbol } from '@botharness/pixel-avatar';
+import { seededRandom } from './avatar-random.js';
+
+export const LINE_PARTS = {
+  eyes: [
+    'dots',
+    'smile',
+    'arcs',
+    'lines',
+    'wide',
+    'sleepy',
+    'wink',
+    'cross',
+    'tight',
+    'tears',
+    'excited',
+    'stare',
+    'swirl',
+    'star',
+    'gentle',
+    'cute',
+    'big',
+    'heart',
+    'hollow',
+    'ovals',
+    'caret',
+    'glare',
+    'droopy',
+  ],
+  brows: ['flat', 'arched', 'raised', 'angry', 'worried', 'thick', 'maro', 'thin', 'none'],
+  nose: ['line', 'hook', 'curve', 'long', 'dot', 'none'],
+  mouth: [
+    'flat',
+    'smile',
+    'grin',
+    'open',
+    'smirk',
+    'wave',
+    'frown',
+    'tongue',
+    'omega',
+    'laugh',
+    'angry',
+    'kiss',
+    'shocked',
+    'triangle',
+    'teeth',
+    'fang',
+    'dot',
+    'pout',
+    'nervous',
+    'bigopen',
+  ],
+  cheeks: ['none', 'lines', 'dots'],
+  glasses: ['none', 'round', 'square'],
+  symbol: ['none', 'sweat', 'anger', 'gloom', 'sparkle', 'heart', 'zzz', 'note', 'steam'],
+} as const;
+export const LINE_RANGES = {
+  spacing: [-3, 3],
+  height: [-3, 3],
+  tilt: [-10, 10],
+} as const;
+export const LINE_COLORS = ['backgroundColor', 'inkColor'] as const;
+
+export type LinePart = keyof typeof LINE_PARTS;
+export type LineRange = keyof typeof LINE_RANGES;
+export type LineColor = (typeof LINE_COLORS)[number];
+export type LineAvatarRecipe = {
+  schemaVersion: 1;
+  family: 'line';
+  assetVersion: 1;
+  rigVersion: 1;
+} & { [P in LinePart]: (typeof LINE_PARTS)[P][number] } & Record<LineRange, number> &
+  Record<LineColor, string>;
+
+export const LINE_SWATCHES: Record<LineColor, readonly string[]> = {
+  backgroundColor: [
+    '#f3d9d2',
+    '#f6e3b4',
+    '#d6ead2',
+    '#cfe3f3',
+    '#e2d8f3',
+    '#f2f0ea',
+    '#f7c9b0',
+    '#c9ece4',
+  ],
+  inkColor: ['#1d2433', '#2a2230', '#3b2a20', '#1f3a5f', '#4a2a4a', '#2f4a3a'],
+};
+
+export const DEFAULT_LINE_RECIPE: LineAvatarRecipe = {
+  schemaVersion: 1,
+  family: 'line',
+  assetVersion: 1,
+  rigVersion: 1,
+  eyes: 'dots',
+  brows: 'flat',
+  nose: 'line',
+  mouth: 'smile',
+  cheeks: 'none',
+  glasses: 'none',
+  symbol: 'none',
+  spacing: 0,
+  height: 0,
+  tilt: 0,
+  backgroundColor: '#f3d9d2',
+  inkColor: '#1d2433',
+};
+
+const linePreset = (parts: Partial<LineAvatarRecipe>): LineAvatarRecipe => ({
+  ...DEFAULT_LINE_RECIPE,
+  ...parts,
+});
+
+export const LINE_PRESETS: readonly LineAvatarRecipe[] = [
+  linePreset({
+    eyes: 'big',
+    brows: 'thin',
+    nose: 'none',
+    mouth: 'bigopen',
+    cheeks: 'dots',
+    backgroundColor: '#f3d9d2',
+    inkColor: '#4a2a4a',
+  }),
+  linePreset({
+    eyes: 'dots',
+    brows: 'flat',
+    nose: 'line',
+    mouth: 'smile',
+    backgroundColor: '#cfe3f3',
+    inkColor: '#1f3a5f',
+  }),
+  linePreset({
+    eyes: 'caret',
+    brows: 'none',
+    nose: 'none',
+    mouth: 'omega',
+    cheeks: 'lines',
+    backgroundColor: '#f6e3b4',
+    inkColor: '#3b2a20',
+  }),
+  linePreset({
+    eyes: 'glare',
+    brows: 'angry',
+    nose: 'hook',
+    mouth: 'fang',
+    backgroundColor: '#f7c9b0',
+    inkColor: '#2a2230',
+  }),
+  linePreset({
+    eyes: 'heart',
+    brows: 'arched',
+    nose: 'dot',
+    mouth: 'triangle',
+    cheeks: 'dots',
+    backgroundColor: '#e2d8f3',
+    inkColor: '#4a2a4a',
+  }),
+  linePreset({
+    eyes: 'hollow',
+    brows: 'raised',
+    nose: 'none',
+    mouth: 'pout',
+    backgroundColor: '#c9ece4',
+    inkColor: '#2f4a3a',
+  }),
+  linePreset({
+    eyes: 'droopy',
+    brows: 'worried',
+    nose: 'curve',
+    mouth: 'nervous',
+    backgroundColor: '#d6ead2',
+    inkColor: '#1d2433',
+  }),
+  linePreset({
+    eyes: 'ovals',
+    brows: 'maro',
+    nose: 'none',
+    mouth: 'dot',
+    cheeks: 'dots',
+    backgroundColor: '#f2f0ea',
+    inkColor: '#2a2230',
+  }),
+  linePreset({
+    eyes: 'tight',
+    brows: 'thick',
+    nose: 'line',
+    mouth: 'teeth',
+    backgroundColor: '#f3d9d2',
+    inkColor: '#1d2433',
+  }),
+  linePreset({
+    eyes: 'sleepy',
+    brows: 'flat',
+    nose: 'none',
+    mouth: 'wave',
+    backgroundColor: '#cfe3f3',
+    inkColor: '#1f3a5f',
+  }),
+  linePreset({
+    eyes: 'star',
+    brows: 'thin',
+    nose: 'none',
+    mouth: 'grin',
+    backgroundColor: '#f6e3b4',
+    inkColor: '#4a2a4a',
+  }),
+  linePreset({
+    eyes: 'dots',
+    brows: 'none',
+    nose: 'long',
+    mouth: 'smirk',
+    glasses: 'round',
+    backgroundColor: '#e2d8f3',
+    inkColor: '#2f4a3a',
+  }),
+];
+
+const LINE_PART_KEYS = Object.keys(LINE_PARTS) as LinePart[];
+const LINE_RANGE_KEYS = Object.keys(LINE_RANGES) as LineRange[];
+
+export function isLineAvatarRecipe(value: unknown): value is LineAvatarRecipe {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const r = value as Record<string, unknown>;
+  if (Object.keys(r).length !== Object.keys(DEFAULT_LINE_RECIPE).length) return false;
+  return (
+    r['schemaVersion'] === 1 &&
+    r['family'] === 'line' &&
+    r['assetVersion'] === 1 &&
+    r['rigVersion'] === 1 &&
+    LINE_PART_KEYS.every(
+      (key) =>
+        typeof r[key] === 'string' && (LINE_PARTS[key] as readonly string[]).includes(r[key]),
+    ) &&
+    LINE_RANGE_KEYS.every((key) => {
+      const v = r[key];
+      const [min, max] = LINE_RANGES[key];
+      return typeof v === 'number' && Number.isInteger(v) && v >= min && v <= max;
+    }) &&
+    LINE_COLORS.every((key) => typeof r[key] === 'string' && /^#[\da-f]{6}$/iu.test(r[key]))
+  );
+}
+
+export function canonicalLineRecipe(recipe: LineAvatarRecipe): LineAvatarRecipe {
+  const canonical: Record<string, unknown> = {
+    schemaVersion: 1,
+    family: 'line',
+    assetVersion: 1,
+    rigVersion: 1,
+  };
+  for (const key of LINE_PART_KEYS) canonical[key] = recipe[key];
+  for (const key of LINE_RANGE_KEYS) canonical[key] = recipe[key];
+  for (const key of LINE_COLORS) canonical[key] = recipe[key].toLowerCase();
+  return canonical as LineAvatarRecipe;
+}
+
+export function seededLineRecipe(seed: string): LineAvatarRecipe {
+  const random = seededRandom(`botharness-line:${seed.trim().toLowerCase()}`);
+  const pick = <T>(values: readonly T[]) => values[Math.floor(random() * values.length)]!;
+  const recipe: Record<string, unknown> = { ...DEFAULT_LINE_RECIPE };
+  for (const part of LINE_PART_KEYS) recipe[part] = pick(LINE_PARTS[part]);
+  recipe['glasses'] = pick(['none', 'none', 'none', 'round', 'square']);
+  recipe['symbol'] = 'none';
+  for (const key of LINE_RANGE_KEYS) {
+    const [min, max] = LINE_RANGES[key];
+    recipe[key] = Math.round(min / 2 + (random() * (max - min)) / 2);
+  }
+  for (const color of LINE_COLORS) recipe[color] = pick(LINE_SWATCHES[color]);
+  return recipe as LineAvatarRecipe;
+}
+
+const CX = 24;
+const EYE_Y = 20;
+const STROKE = 3;
+export type LineMorphNode = readonly [string, Readonly<Record<string, string>>];
+
+const shape = (markup: string): LineMorphNode[] =>
+  [...markup.matchAll(/<(path|ellipse|circle|rect)\s([^>]*?)\/>/gu)].map(([, tag, attrs]) => [
+    tag!,
+    Object.fromEntries(
+      [...attrs!.matchAll(/([\w-]+)="([^"]*)"/gu)]
+        .filter(([, key]) => /^(d|cx|cy|r|rx|ry|x|y|width|height)$/u.test(key!))
+        .map(([, key, value]) => [key!, value!]),
+    ),
+  ]);
+
+export const LINE_TOOL_SYMBOLS: Readonly<Record<PixelSymbol, readonly LineMorphNode[]>> = {
+  thinking: shape(
+    '<path d="M15.5 29Q10 29 10 24Q10 19.5 14.6 19Q15.6 12.6 22 12.6Q27.6 12.6 29.6 16.6Q33.2 15.2 36.2 18.2Q39.2 21.6 37.2 25.6Q35.6 29 32 29Z"/><circle cx="19" cy="22.6" r="1.2"/><circle cx="24" cy="22.6" r="1.2"/><circle cx="29" cy="22.6" r="1.2"/><circle cx="13" cy="34" r="1.6"/><circle cx="9.6" cy="38" r="1"/>',
+  ),
+  ask: shape(
+    '<path d="M17.5 17Q17.5 10.5 24 10.5Q30.5 10.5 30.5 17Q30.5 21.5 24 23.5L24 27.5"/><circle cx="24" cy="34" r="1.3"/>',
+  ),
+  read: shape(
+    '<path d="M10 15Q17 13 24 16Q31 13 38 15L38 33Q31 31 24 34Q17 31 10 33Z"/><path d="M24 16L24 34"/>',
+  ),
+  write: shape(
+    '<path d="M15 10L28 10L34 16L34 38L15 38Z"/><path d="M24.5 21L24.5 31"/><path d="M19.5 26L29.5 26"/>',
+  ),
+  edit: shape('<path d="M14 34L16 28L31 13L35 17L20 32Z"/><path d="M28 16L32 20"/>'),
+  bash: shape(
+    '<path d="M12 12L36 12Q38 12 38 14L38 34Q38 36 36 36L12 36Q10 36 10 34L10 14Q10 12 12 12Z"/><path d="M15.5 19.5L20.5 24L15.5 28.5"/><path d="M23.5 29L31.5 29"/>',
+  ),
+  search: shape('<circle cx="22" cy="22" r="7.5"/><path d="M27.5 27.5L34 34"/>'),
+  web: shape(
+    '<circle cx="24" cy="24" r="12"/><ellipse cx="24" cy="24" rx="5" ry="12"/><path d="M12 24L36 24"/>',
+  ),
+  fetch: shape(
+    '<path d="M24 10L24 28"/><path d="M17 21L24 28L31 21"/><path d="M12 30L12 36L36 36L36 30"/>',
+  ),
+  todo: shape(
+    '<path d="M13 10L35 10L35 38L13 38Z"/><path d="M17 18L19 20L23 16"/><path d="M26 18L31 18"/><path d="M17 28L19 30L23 26"/><path d="M26 28L31 28"/>',
+  ),
+  subagent: shape(
+    '<circle cx="18" cy="17" r="4"/><circle cx="30" cy="17" r="4"/><path d="M10 34Q10 25 18 25Q26 25 26 34"/><path d="M22 34Q22 25 30 25Q38 25 38 34"/>',
+  ),
+  workflow: shape(
+    '<rect x="10" y="12" width="7" height="7"/><rect x="31" y="12" width="7" height="7"/><rect x="31" y="29" width="7" height="7"/><path d="M17 15.5L31 15.5"/><path d="M24 15.5L24 32.5L31 32.5"/>',
+  ),
+  goal: shape('<path d="M14 10L14 38"/><path d="M14 11L34 11L29 17L34 23L14 23"/>'),
+  present: shape(
+    '<path d="M10 12L38 12L38 30L10 30Z"/><path d="M17 26L17 22"/><path d="M23 26L23 18"/><path d="M29 26L29 20"/><path d="M18 38L21 30"/><path d="M30 38L27 30"/>',
+  ),
+  approval: shape(
+    '<path d="M24 9L36 13L36 22Q36 32 24 38Q12 32 12 22L12 13Z"/><path d="M24 17L24 26"/><circle cx="24" cy="31" r="1.2"/>',
+  ),
+  other: shape(
+    '<path d="M28 33L28 11Q32.5 12.5 34 17.5"/><ellipse cx="24.5" cy="33" rx="3.6" ry="2.6"/>',
+  ),
+};
+
+export function lineMorphFace(recipe: LineAvatarRecipe): {
+  nodes: LineMorphNode[];
+  pivot: readonly [number, number];
+  tilt: number;
+} {
+  return {
+    nodes: shape(features(recipe, 0).morph),
+    pivot: [CX, EYE_Y + recipe.height + 6],
+    tilt: recipe.tilt,
+  };
+}
+
+function fmt(n: number): string {
+  return String(Math.round(n * 100) / 100);
+}
+
+function eye(
+  style: LineAvatarRecipe['eyes'],
+  x: number,
+  y: number,
+  k: number,
+  ink: string,
+  side: -1 | 1,
+): string {
+  const w = 3 * k;
+  const dir = -side;
+  const X = (dx: number) => fmt(x + dx);
+  switch (style) {
+    case 'dots':
+      return `<ellipse cx="${fmt(x)}" cy="${y}" rx="${fmt(1.9 * k)}" ry="1.9" fill="${ink}" stroke="none"/>`;
+    case 'smile':
+      return `<path d="M${fmt(x - w)} ${y - 1}Q${fmt(x)} ${y + 2.5} ${fmt(x + w)} ${y - 1}"/>`;
+    case 'arcs':
+      return `<path d="M${fmt(x - w)} ${y + 1}Q${fmt(x)} ${y - 2.5} ${fmt(x + w)} ${y + 1}"/>`;
+    case 'lines':
+      return `<path d="M${fmt(x - w)} ${y}L${fmt(x + w)} ${y}"/>`;
+    case 'wide':
+      return `<ellipse cx="${fmt(x)}" cy="${y}" rx="${fmt(2.8 * k)}" ry="2.8"/><circle cx="${fmt(x)}" cy="${y + 0.4}" r="1" fill="${ink}" stroke="none"/>`;
+    case 'sleepy':
+      return `<path d="M${fmt(x - w)} ${y - 0.5}L${fmt(x + w)} ${y - 0.5}M${fmt(x - w * 0.7)} ${y - 0.5}Q${fmt(x)} ${y + 2.5} ${fmt(x + w * 0.7)} ${y - 0.5}"/>`;
+    case 'wink':
+      return `<ellipse cx="${fmt(x)}" cy="${y}" rx="${fmt(1.9 * k)}" ry="1.9" fill="${ink}" stroke="none"/>`;
+    case 'cross':
+      return `<path d="M${fmt(x - 2 * k)} ${y - 2}L${fmt(x + 2 * k)} ${y + 2}M${fmt(x + 2 * k)} ${y - 2}L${fmt(x - 2 * k)} ${y + 2}"/>`;
+    case 'tight':
+      return `<path d="M${X(-dir * w * 0.8)} ${y - 2.3}L${X(dir * w * 0.8)} ${y}L${X(-dir * w * 0.8)} ${y + 2.3}"/>`;
+    case 'tears':
+      return `<path d="M${X(-w)} ${y - 0.5}L${X(w)} ${y - 0.5}M${X(-w * 0.35)} ${y}L${X(-w * 0.35)} ${y + 3}M${X(w * 0.35)} ${y}L${X(w * 0.35)} ${y + 3}"/><path d="M${X(-w * 0.35)} ${y + 4.5}L${X(-w * 0.35)} ${y + 7.5}M${X(w * 0.35)} ${y + 4.5}L${X(w * 0.35)} ${y + 6.5}" stroke="#6fa8dc" stroke-width="1.8"/>`;
+    case 'excited':
+      return `<path d="M${X(-dir * w * 0.8)} ${y - 2.5}L${X(dir * w * 0.8)} ${y - 0.5}L${X(-dir * w * 0.8)} ${y + 1.5}M${X(-w)} ${y + 3.5}L${X(w)} ${y + 3.5}"/>`;
+    case 'stare':
+      return `<path d="M${X(-w)} ${y + 1.8}Q${X(0)} ${y - 3.2} ${X(w)} ${y + 1.8}"/><circle cx="${X(0)}" cy="${y + 0.6}" r="1.1" fill="${ink}" stroke="none"/>`;
+    case 'swirl':
+      return `<circle cx="${X(0)}" cy="${y}" r="${fmt(2.8 * k)}" stroke-width="1.8"/><path d="M${X(1.2 * k)} ${y}A${fmt(1.2 * k)} 1.2 0 1 1 ${X(0)} ${y - 1.2}" stroke-width="1.6"/>`;
+    case 'star': {
+      const points = Array.from({ length: 10 }, (_, i) => {
+        const a = -Math.PI / 2 + (i * Math.PI) / 5;
+        const r = i % 2 === 0 ? 3.3 : 1.4;
+        return `${X(r * Math.cos(a) * k)} ${fmt(y + r * Math.sin(a))}`;
+      });
+      return `<path d="M${points.join('L')}Z" fill="${ink}" stroke-width="1"/>`;
+    }
+    case 'gentle':
+      return `<path d="M${X(-dir * w * 0.6)} ${y + 1.2}L${X(dir * w * 0.7)} ${y - 1.4}"/>`;
+    case 'cute':
+      return `<ellipse cx="${X(0)}" cy="${y}" rx="${fmt(2.7 * k)}" ry="2.9" fill="${ink}" stroke="none"/><circle cx="${X(0.9 * k)}" cy="${y - 1}" r=".9" fill="#ffffff" stroke="none"/>`;
+    case 'big':
+      return `<ellipse cx="${X(0)}" cy="${y + 0.5}" rx="${fmt(3.4 * k)}" ry="3.9" fill="${ink}" stroke="none"/><circle cx="${X(1.2 * k)}" cy="${y - 1}" r="1.2" fill="#ffffff" stroke="none"/><circle cx="${X(-1.2 * k)}" cy="${y + 2}" r=".6" fill="#ffffff" stroke="none"/>`;
+    case 'heart':
+      return `<path d="M${X(0)} ${fmt(y + 2.8)}Q${X(-3.4 * k)} ${fmt(y + 0.2)} ${X(-3.1 * k)} ${fmt(y - 1.4)}A${fmt(1.6 * k)} 1.6 0 0 1 ${X(0)} ${fmt(y - 1.6)}A${fmt(1.6 * k)} 1.6 0 0 1 ${X(3.1 * k)} ${fmt(y - 1.4)}Q${X(3.4 * k)} ${fmt(y + 0.2)} ${X(0)} ${fmt(y + 2.8)}Z" fill="${ink}" stroke-width="1"/>`;
+    case 'hollow':
+      return `<ellipse cx="${X(0)}" cy="${y}" rx="${fmt(2.4 * k)}" ry="2.4" stroke-width="2.2"/>`;
+    case 'ovals':
+      return `<ellipse cx="${X(0)}" cy="${y}" rx="${fmt(1.5 * k)}" ry="3.2" fill="${ink}" stroke="none"/>`;
+    case 'caret':
+      return `<path d="M${X(-w)} ${y + 1.6}L${X(0)} ${y - 1.8}L${X(w)} ${y + 1.6}"/>`;
+    case 'glare':
+      return `<path d="M${X(-w)} ${y - 1}L${X(w)} ${y - 1}"/><path d="M${X(-1.8 * k)} ${y - 0.4}A${fmt(1.8 * k)} 1.9 0 0 0 ${X(1.8 * k)} ${y - 0.4}Z" fill="${ink}" stroke="none"/>`;
+    case 'droopy':
+      return `<path d="M${X(-dir * w)} ${y - 1.2}Q${X(0)} ${y - 1.6} ${X(dir * w)} ${y + 1.4}"/><circle cx="${X(-dir * 0.4 * k)}" cy="${y + 1.4}" r="1.2" fill="${ink}" stroke="none"/>`;
+  }
+}
+
+function closedEye(x: number, y: number, k: number): string {
+  return `<path d="M${fmt(x - 3 * k)} ${y}L${fmt(x + 3 * k)} ${y}"/>`;
+}
+
+function brow(
+  style: LineAvatarRecipe['brows'],
+  x: number,
+  y: number,
+  k: number,
+  inner: number,
+): string {
+  const w = 3.4 * k;
+  const o = -inner;
+  const at = (dx: number, dy: number) => `${fmt(x + dx * o * w)} ${fmt(y + dy)}`;
+  switch (style) {
+    case 'none':
+      return '';
+    case 'flat':
+      return `<path d="M${at(1, 0)}L${at(-1, 0)}"/>`;
+    case 'arched':
+      return `<path d="M${at(1, 1)}Q${at(0, -2)} ${at(-1, 0.5)}"/>`;
+    case 'raised':
+      return `<path d="M${at(1, -0.5)}Q${at(0, -3.5)} ${at(-1, -1)}"/>`;
+    case 'angry':
+      return `<path d="M${at(1, -1.2)}L${at(-1, 1.2)}"/>`;
+    case 'worried':
+      return `<path d="M${at(1, 1.2)}L${at(-1, -1.2)}"/>`;
+    case 'thick':
+      return `<path d="M${at(1, 0.3)}Q${at(0, -1.2)} ${at(-1, 0.3)}" stroke-width="4.2"/>`;
+    case 'maro':
+      return `<path d="M${fmt(x - 0.8 * k)} ${fmt(y - 0.5)}L${fmt(x + 0.8 * k)} ${fmt(y - 0.5)}" stroke-width="3.6"/>`;
+    case 'thin':
+      return `<path d="M${at(1.1, 0.4)}Q${at(0, -2.6)} ${at(-1.1, 0.4)}" stroke-width="1.5"/>`;
+  }
+}
+
+function nose(
+  style: LineAvatarRecipe['nose'],
+  x: number,
+  y: number,
+  side: number,
+  ink: string,
+): string {
+  const s = side || 1;
+  switch (style) {
+    case 'none':
+      return '';
+    case 'line':
+      return `<path d="M${fmt(x + 1.5 * s)} ${y}L${fmt(x - 1.5 * s)} ${y + 7}"/>`;
+    case 'hook':
+      return `<path d="M${fmt(x + 1 * s)} ${y}L${fmt(x - 1.5 * s)} ${y + 7}L${fmt(x + 1.5 * s)} ${y + 7}"/>`;
+    case 'curve':
+      return `<path d="M${fmt(x)} ${y}Q${fmt(x - 3 * s)} ${y + 6} ${fmt(x + 1 * s)} ${y + 7}"/>`;
+    case 'long':
+      return `<path d="M${fmt(x)} ${y - 1}L${fmt(x)} ${y + 7}"/>`;
+    case 'dot':
+      return `<circle cx="${fmt(x)}" cy="${y + 6}" r="1.1" fill="${ink}" stroke="none"/>`;
+  }
+}
+
+function mouth(
+  style: LineAvatarRecipe['mouth'],
+  x: number,
+  y: number,
+  k: number,
+  ink: string,
+): string {
+  const w = 4.5 * k;
+  const p = (dx: number, dy: number) => `${fmt(x + dx * w)} ${fmt(y + dy)}`;
+  switch (style) {
+    case 'flat':
+      return `<path d="M${p(-1, 0.3)}L${p(1, -0.3)}"/>`;
+    case 'smile':
+      return `<path d="M${p(-1, -0.5)}Q${p(0, 3)} ${p(1, -0.5)}"/>`;
+    case 'grin':
+      return `<path d="M${p(-1, -0.5)}L${p(1, -0.5)}Q${p(0.9, 4)} ${p(0, 4)}Q${p(-0.9, 4)} ${p(-1, -0.5)}Z" fill="${ink}"/>`;
+    case 'open':
+      return `<ellipse cx="${fmt(x)}" cy="${y + 0.8}" rx="${fmt(2.2 * k)}" ry="2.6"/>`;
+    case 'smirk':
+      return `<path d="M${p(-1, 0.5)}L${p(0.5, 0.5)}Q${p(1, 0.4)} ${p(1.1, -1.5)}"/>`;
+    case 'wave':
+      return `<path d="M${p(-1, 0)}Q${p(-0.5, -1.6)} ${p(0, 0)}Q${p(0.5, 1.6)} ${p(1, 0)}"/>`;
+    case 'frown':
+      return `<path d="M${p(-1, 1.5)}Q${p(0, -2)} ${p(1, 1.5)}"/>`;
+    case 'tongue':
+      return `<path d="M${p(-1, -0.5)}Q${p(0, 3)} ${p(1, -0.5)}M${p(0.05, 1.8)}Q${p(0.15, 4.5)} ${p(0.6, 1.2)}"/>`;
+    case 'omega':
+      return `<path d="M${p(-1, -0.6)}Q${p(-0.55, 3)} ${p(0, 0.2)}Q${p(0.55, 3)} ${p(1, -0.6)}"/>`;
+    case 'laugh':
+      return `<path d="M${p(-0.9, -0.6)}L${p(0.9, -0.6)}L${p(0, 4.2)}Z" fill="${ink}"/>`;
+    case 'angry':
+      return `<rect x="${fmt(x - w * 0.9)}" y="${y - 1.6}" width="${fmt(w * 1.8)}" height="4.2" rx=".8" stroke-width="2"/><path d="M${p(-0.3, -1.6)}L${p(-0.3, 2.6)}M${p(0.3, -1.6)}L${p(0.3, 2.6)}M${p(-0.9, 0.5)}L${p(0.9, 0.5)}" stroke-width="1.4"/>`;
+    case 'kiss':
+      return `<path d="M${p(-0.15, -2)}Q${p(0.45, -1.9)} ${p(0.2, 0)}Q${p(0.45, 1.9)} ${p(-0.15, 2)}"/>`;
+    case 'shocked':
+      return `<rect x="${fmt(x - 2.4 * k)}" y="${y - 1.6}" width="${fmt(4.8 * k)}" height="4.6" rx="1"/>`;
+    case 'triangle':
+      return `<path d="M${p(-0.75, -0.8)}L${p(0.75, -0.8)}L${p(0, 3)}Z"/>`;
+    case 'teeth':
+      return `<path d="M${p(-1, -0.8)}L${p(1, -0.8)}Q${p(1, 3.6)} ${p(0, 3.6)}Q${p(-1, 3.6)} ${p(-1, -0.8)}Z"/><path d="M${p(-0.95, 0.9)}L${p(0.95, 0.9)}" stroke-width="1.4"/>`;
+    case 'fang':
+      return `<path d="M${p(-1, -0.5)}Q${p(0, 3)} ${p(1, -0.5)}"/><path d="M${p(0.32, 1.2)}L${p(0.45, 2.9)}L${p(0.62, 0.9)}" fill="#ffffff" stroke-width="1.2"/>`;
+    case 'dot':
+      return `<circle cx="${fmt(x)}" cy="${y + 0.6}" r="1.4" fill="${ink}" stroke="none"/>`;
+    case 'pout':
+      return `<path d="M${p(-0.2, -2.2)}Q${p(0.55, -1.8)} ${p(0.05, 0)}Q${p(0.55, 1.8)} ${p(-0.2, 2.2)}"/>`;
+    case 'nervous':
+      return `<path d="M${p(-1, 0.6)}L${p(-0.6, -0.8)}L${p(-0.2, 0.6)}L${p(0.2, -0.8)}L${p(0.6, 0.6)}L${p(1, -0.8)}"/>`;
+    case 'bigopen':
+      return `<path d="M${p(-1, -1)}L${p(1, -1)}Q${p(1, 5)} ${p(0, 5)}Q${p(-1, 5)} ${p(-1, -1)}Z" fill="${ink}"/><path d="M${p(-0.5, 3.6)}Q${p(0, 1.6)} ${p(0.5, 3.6)}" stroke="#ef6f84" stroke-width="2"/>`;
+  }
+}
+
+function cheeks(
+  style: LineAvatarRecipe['cheeks'],
+  xs: readonly number[],
+  y: number,
+  ink: string,
+): string {
+  if (style === 'none') return '';
+  return xs
+    .map((x) =>
+      style === 'lines'
+        ? `<path d="M${fmt(x - 2)} ${y + 1}L${fmt(x - 1)} ${y - 1}M${fmt(x + 0.5)} ${y + 1}L${fmt(x + 1.5)} ${y - 1}" stroke-width="1.6"/>`
+        : `<circle cx="${fmt(x)}" cy="${y}" r="1.6" fill="${ink}" fill-opacity=".22" stroke="none"/>`,
+    )
+    .join('');
+}
+
+function features(
+  recipe: LineAvatarRecipe,
+  yawDegrees: number,
+): { eyes: string; closed: string; rest: string; morph: string } {
+  const ink = recipe.inkColor;
+  const yaw = (yawDegrees * Math.PI) / 180;
+  const R = 19;
+  const half = 8.5 + recipe.spacing;
+  const theta = Math.asin(half / R);
+  const y = EYE_Y + recipe.height;
+  const at = (side: -1 | 1) => {
+    const angle = yaw + side * theta;
+    return { x: CX + R * Math.sin(angle), k: Math.max(0.35, Math.cos(angle) / Math.cos(theta)) };
+  };
+  const left = at(-1);
+  const right = at(1);
+  const center = CX + R * Math.sin(yaw) * 0.9;
+  const browGap = recipe.glasses === 'none' ? 6.5 : 8;
+  const eyes =
+    eye(recipe.eyes, left.x, y, left.k, ink, -1) +
+    (recipe.eyes === 'wink'
+      ? closedEye(right.x, y, right.k)
+      : eye(recipe.eyes, right.x, y, right.k, ink, 1));
+  const closed = closedEye(left.x, y, left.k) + closedEye(right.x, y, right.k);
+  const glasses =
+    recipe.glasses === 'none'
+      ? ''
+      : [left, right]
+          .map((e) =>
+            recipe.glasses === 'round'
+              ? `<ellipse cx="${fmt(e.x)}" cy="${y}" rx="${fmt(4.6 * e.k)}" ry="4.6" stroke-width="1.8"/>`
+              : `<rect x="${fmt(e.x - 4.8 * e.k)}" y="${y - 4}" width="${fmt(9.6 * e.k)}" height="8" rx="1.6" stroke-width="1.8"/>`,
+          )
+          .join('') +
+        `<path d="M${fmt(left.x + 4.6 * left.k)} ${y - 0.5}Q${fmt((left.x + right.x) / 2)} ${y - 2} ${fmt(right.x - 4.6 * right.k)} ${y - 0.5}" stroke-width="1.8"/>`;
+  const expression =
+    brow(recipe.brows, left.x, y - browGap, left.k, 1) +
+    brow(recipe.brows, right.x, y - browGap, right.k, -1) +
+    nose(recipe.nose, center, y + 3, Math.sign(yaw), ink) +
+    mouth(recipe.mouth, CX + R * Math.sin(yaw) * 0.8, y + 16, Math.max(0.6, Math.cos(yaw)), ink);
+  const rest =
+    expression + cheeks(recipe.cheeks, [left.x - 1.5, right.x + 1.5], y + 10, ink) + glasses;
+  return {
+    eyes,
+    closed,
+    rest,
+    morph:
+      eyes +
+      expression +
+      glasses +
+      (recipe.cheeks === 'lines'
+        ? cheeks('lines', [left.x - 1.5, right.x + 1.5], y + 10, ink)
+        : ''),
+  };
+}
+
+export function lineAvatarSvg(
+  recipe: LineAvatarRecipe,
+  options: { turns?: readonly number[] } = {},
+): string {
+  if (!isLineAvatarRecipe(recipe)) throw new Error('invalid Avatar recipe');
+  const ink = recipe.inkColor;
+  const tilt = `rotate(${recipe.tilt} ${CX} ${EYE_Y + recipe.height + 6})`;
+  const stroke = `fill="none" stroke="${ink}" stroke-width="${STROKE}" stroke-linecap="round" stroke-linejoin="round"`;
+  const face = (yaw: number) => features(recipe, yaw);
+  const base = face(0);
+  const head = (
+    parts: { eyes: string; closed: string; rest: string },
+    cls = 'class="bh-illustrated-',
+  ) =>
+    `<g ${cls}head" ${stroke}><g ${cls}face" transform="${tilt}">${parts.rest}<g ${cls}gaze">${parts.eyes}</g><g ${cls}blink" opacity="0">${parts.closed}</g></g></g>`;
+  const turns = (options.turns ?? [])
+    .map(
+      (delta) =>
+        `<g data-avatar-turn="${delta}" opacity="0">${head(face(delta), 'data-turn-part="')}</g>`,
+    )
+    .join('');
+  return [
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="512" height="512" aria-hidden="true">',
+    `<rect width="48" height="48" rx="11" fill="${recipe.backgroundColor}"/>`,
+    '<g class="bh-illustrated-body"></g>',
+    head(base),
+    turns,
+    `<path data-avatar-transition="" d="M24 24" opacity="0" ${stroke}/>`,
+
+    '</svg>',
+  ].join('');
+}

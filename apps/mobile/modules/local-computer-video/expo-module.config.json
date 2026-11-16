@@ -1,0 +1,13 @@
+{
+  "platforms": ["android", "apple"],
+  "android": {
+    "modules": [
+      "expo.modules.localcomputervideo.LocalComputerVideoModule",
+      "expo.modules.localcomputervideo.CallCameraModule"
+    ]
+  },
+  "apple": {
+    "modules": ["LocalComputerVideoModule", "CallCameraModule"],
+    "podspecPath": "ios/LocalComputerVideo.podspec"
+  }
+}

@@ -1,0 +1,1468 @@
+#!/usr/bin/env node
+import { execFileSync, spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import { cookieFor, rpc, verifyPaths } from './verify-app.mjs';
+import { installed } from './e2e-assignment-probe.mjs';
+
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+
+export const DEFAULT_MODEL = 'opencode-go/deepseek-v4.1-flash';
+
+export const usage = `Usage: node scripts/e2e-llm-scenarios.mjs [options]
+
+Run multi-Bot scenarios against a real model on an isolated DSH Host and assert on canonical
+Channel state (mentions, deliveries, replies), not on wording. The model is a black box, so these
+catch a feature that silently breaks an older model-driven flow. They cost tokens: run them on a
+schedule or when the areas a scenario names change, not on every pull request.
+
+Every attempt records the tokens its Bots spent (uncached input, output, cache read, cache write)
+from the Host's usage records, so a design change can be judged on cost as well as pass rate.
+
+Options:
+  --name <n>            verify-app instance to use (default llm-e2e).
+  --launch              Launch that instance first (after pnpm build) and stop it afterwards.
+  --scenario <id>       Run only this scenario (repeatable). Default: every scenario except
+                        the external ones (real websites such as YouTube), which run only
+                        when named here and need a Host whose Bot Browser can reach them.
+  --changed-from <ref>  Run only scenarios whose areas changed since this Git ref.
+  --attempts <n>        Attempts per scenario, 1-5 (default 2). A scenario passes when any
+                        attempt passes; the report keeps every attempt so flakiness stays visible.
+  --runs <n>            Run each scenario exactly n times, 1-20, without stopping at the first
+                        pass, to measure pass rate and token spread. Replaces --attempts.
+  --model <route>       provider/model[@effort] for every scenario Bot (repeatable). Each model
+                        runs every selected scenario. Default: ${DEFAULT_MODEL};
+                        host-default keeps the Host's own default model.
+  --baseline <path>     A previous report; print pass-rate and token deltas against it.
+  --compare <a> <b>     Print the deltas between two saved reports (baseline a, current b), then
+                        exit without launching anything.
+  --settle <s>          Seconds token totals must stay unchanged before an attempt's usage is
+                        read as final (default 12, max 120).
+  --timeout <s>         Seconds to wait for each scenario's expected state (default 240).
+  --report <path>       Write the JSON report here (default .humanlayer/llm-e2e/<time>.json),
+                        and a Markdown summary next to it (same name, .md).
+  --list                Print the scenarios and their areas, then exit.
+
+The Host needs a model credential: the AX opencode-go selection from docs/agents/ax-model.md
+(CI runs dev-model.mjs setup --from-env --model deepseek-v4.1-flash with OPENCODE_GO_API_KEY).
+Exit status is 1 when a selected scenario has no passing attempt or run on some model.`;
+
+const RUNTIME_AREAS = [
+  'packages/core/src/runtime/',
+  'packages/core/src/channels/',
+  'packages/core/src/messaging/',
+  'packages/core/src/plugin.ts',
+  'packages/deepseekbot/',
+  'scripts/e2e-llm-scenarios.mjs',
+  'package.json',
+  'pnpm-lock.yaml',
+  'patches/',
+];
+
+const CAST = {
+  nexus: {
+    displayName: '总控 Nexus',
+    persona:
+      '你是项目总控 Nexus。你在群里协调各位同事，收到同事汇报后简短确认并决定下一步。需要同事做事时在群里 @ 他。',
+  },
+  aura: {
+    displayName: '美工 Aura',
+    persona: '你是美工 Aura，负责视觉设计。任务很小就直接在群里给出结果。',
+  },
+  atlas: {
+    displayName: '叙事 Atlas',
+    persona: '你是叙事策划 Atlas，负责故事和文案。任务很小就直接在群里给出结果。',
+  },
+  vera: {
+    displayName: '质检 Vera',
+    persona: '你是质检 Vera，负责审核同事的产出并指出需要修改的地方。',
+  },
+};
+
+const REPORT_RULE = '大家都只在被 @ 时才会被唤醒，所以完成后必须在群消息里 @总控 Nexus 汇报结果。';
+
+export const SCENARIOS = [
+  {
+    id: 'dm-reply',
+    summary: 'A Human DM gets a committed reply through bot_send_message.',
+    areas: RUNTIME_AREAS,
+    bots: ['aura'],
+    async run(ctx) {
+      const dm = await ctx.dm('aura');
+      await ctx.humanSend(dm, 'What is 6 times 7? Answer with digits only.');
+      await ctx.waitFor('Bot reply with 42', () =>
+        ctx
+          .messages(dm)
+          .find(
+            (message) =>
+              ctx.isBot(message, 'aura') && message.body.trim() === '42' && !message.sessionFailure,
+          ),
+      );
+    },
+  },
+  {
+    id: 'dm-reply-schema-filled',
+    summary:
+      'A model that fills every optional bot_send_message field with an empty value still gets its DM reply committed on the first call (#3296).',
+    areas: RUNTIME_AREAS,
+    bots: ['aura'],
+    async run(ctx) {
+      const dm = await ctx.dm('aura');
+      await ctx.humanSend(
+        dm,
+        [
+          'This is a tool-argument compatibility test. Reply with exactly the digits 42 by calling bot_send_message once.',
+          'Fill in EVERY parameter of bot_send_message explicitly: source_event_id is this message\'s Source Event ID and body is "42";',
+          'every other parameter must still be present with an empty value, exactly:',
+          'attachments: [], binding_id: "", bot_id: "", channel_id: "", conversation_id: "", draft_id: "", grant_id: "", observation_id: "",',
+          'mention_bot_ids: [], mention_human_ids: [], recover: false, resolve_inbox_ids: [], freshness_override: {"draftVersion": 0, "reason": ""}.',
+          'If the call returns an error, do not retry and do not drop any parameter; stop.',
+        ].join(' '),
+      );
+      const sendCalls = async () => {
+        const calls = (await ctx.toolCalls('aura')).filter(
+          (call) => call.name === 'bot_send_message',
+        );
+        ctx.note({ botSendMessageCalls: calls });
+        return calls;
+      };
+      try {
+        await ctx.waitFor('Bot reply with 42', () =>
+          ctx
+            .messages(dm)
+            .find(
+              (message) =>
+                ctx.isBot(message, 'aura') &&
+                message.body.trim() === '42' &&
+                !message.sessionFailure,
+            ),
+        );
+      } catch (error) {
+        const refused = (await sendCalls()).find((call) => call.isError);
+        throw refused ? new Error(`no reply; bot_send_message refused: ${refused.result}`) : error;
+      }
+      const first = await ctx.waitFor(
+        'a recorded result for the first bot_send_message call',
+        async () => {
+          const [call] = await sendCalls();
+          return call?.hasResult ? call : undefined;
+        },
+      );
+      const expected = {
+        body: '42',
+        attachments: [],
+        binding_id: '',
+        bot_id: '',
+        channel_id: '',
+        conversation_id: '',
+        draft_id: '',
+        grant_id: '',
+        observation_id: '',
+        mention_bot_ids: [],
+        mention_human_ids: [],
+        recover: false,
+        resolve_inbox_ids: [],
+        freshness_override: { draftVersion: 0, reason: '' },
+      };
+      const missing = Object.entries(expected)
+        .filter(([key, value]) => JSON.stringify(first?.arguments?.[key]) !== JSON.stringify(value))
+        .map(([key]) => key);
+      if (missing.length > 0)
+        throw new Error(
+          `the first bot_send_message call did not send the empty fields (${missing.join(', ')}); nothing was tested`,
+        );
+      if (first.isError) throw new Error(`the schema-filled call was refused: ${first.result}`);
+    },
+  },
+  {
+    id: 'worker-reports-to-coordinator',
+    summary: 'A worker woken by a Human mention reports to the coordinator with @, waking it.',
+    areas: RUNTIME_AREAS,
+    bots: ['nexus', 'aura'],
+    async run(ctx) {
+      const group = await ctx.mentionsOnlyGroup(['nexus', 'aura']);
+      await ctx.humanSend(group, `请用一句话给出一个像素风 logo 的配色方案。${REPORT_RULE}`, [
+        'aura',
+      ]);
+      await ctx.waitFor('Aura mentions Nexus and Nexus wakes', () =>
+        ctx.messages(group).find((message) => ctx.mentionedAndWoken(message, 'aura', 'nexus')),
+      );
+    },
+  },
+  {
+    id: 'two-workers-report',
+    summary: 'Two workers from one Human kickoff each wake the coordinator once.',
+    areas: RUNTIME_AREAS,
+    bots: ['nexus', 'aura', 'atlas'],
+    async run(ctx) {
+      const group = await ctx.mentionsOnlyGroup(['nexus', 'aura', 'atlas']);
+      await ctx.humanSend(group, `你们两位各写一句游戏口号。${REPORT_RULE}`, ['aura', 'atlas']);
+      await ctx.waitFor('Aura and Atlas each mention Nexus and wake it', () => {
+        const messages = ctx.messages(group);
+        const aura = messages.find((message) => ctx.mentionedAndWoken(message, 'aura', 'nexus'));
+        const atlas = messages.find((message) => ctx.mentionedAndWoken(message, 'atlas', 'nexus'));
+        return aura && atlas ? [aura, atlas] : undefined;
+      });
+    },
+  },
+  {
+    id: 'coordinator-delegates',
+    summary: 'The coordinator hands a task to a colleague with @, waking it.',
+    areas: RUNTIME_AREAS,
+    bots: ['nexus', 'aura'],
+    async run(ctx) {
+      const group = await ctx.mentionsOnlyGroup(['nexus', 'aura']);
+      await ctx.humanSend(
+        group,
+        '请在群里 @美工 Aura，让她给出一个像素风 logo 的配色方案。大家都只在被 @ 时才会被唤醒。',
+        ['nexus'],
+      );
+      await ctx.waitFor('Nexus mentions Aura and Aura wakes', () =>
+        ctx.messages(group).find((message) => ctx.mentionedAndWoken(message, 'nexus', 'aura')),
+      );
+    },
+  },
+  {
+    id: 'mid-sentence-report',
+    summary: 'A worker writes @coordinator in the middle of its report, which still wakes it.',
+    areas: RUNTIME_AREAS,
+    bots: ['nexus', 'aura'],
+    async run(ctx) {
+      const group = await ctx.mentionsOnlyGroup(['nexus', 'aura']);
+      await ctx.humanSend(
+        group,
+        '请用一句话给出一个像素风 logo 的配色方案。大家都只在被 @ 时才会被唤醒。汇报时把 @总控 Nexus 写在句子中间，例如：配色已完成，请 @总控 Nexus 查收。',
+        ['aura'],
+      );
+      await ctx.waitFor('Aura mentions Nexus mid-sentence and Nexus wakes', () =>
+        ctx.messages(group).find((message) => ctx.mentionedAndWoken(message, 'aura', 'nexus')),
+      );
+    },
+  },
+  {
+    id: 'worker-to-worker-chain',
+    summary: 'A worker hands off to another worker, who then reports to the coordinator.',
+    areas: RUNTIME_AREAS,
+    bots: ['nexus', 'aura', 'atlas'],
+    async run(ctx) {
+      const group = await ctx.mentionsOnlyGroup(['nexus', 'aura', 'atlas']);
+      await ctx.humanSend(
+        group,
+        `请先用一句话给出一个像素风配色方案，然后在群里 @叙事 Atlas，请他根据配色写一句游戏口号。Atlas 写完口号后 @总控 Nexus 汇报。${REPORT_RULE}`,
+        ['aura'],
+      );
+      await ctx.waitFor('Aura wakes Atlas, then Atlas wakes Nexus', () => {
+        const messages = ctx.messages(group);
+        const handoff = messages.find((message) => ctx.mentionedAndWoken(message, 'aura', 'atlas'));
+        const report = messages.find((message) => ctx.mentionedAndWoken(message, 'atlas', 'nexus'));
+        return handoff && report ? [handoff, report] : undefined;
+      });
+    },
+  },
+  {
+    id: 'delegate-and-report-back',
+    summary:
+      'The coordinator hands a task to a colleague in any way it chooses and the colleague reports back with @, a full round trip.',
+    areas: RUNTIME_AREAS,
+    bots: ['nexus', 'atlas'],
+    async run(ctx) {
+      const group = await ctx.mentionsOnlyGroup(['nexus', 'atlas']);
+      await ctx.humanSend(group, `请安排叙事 Atlas 写一句游戏口号。${REPORT_RULE}`, ['nexus']);
+      await ctx.waitFor('Atlas, woken only by Nexus, reports back with @ and Nexus wakes', () => {
+        const report = ctx
+          .messages(group)
+          .find(
+            (message) =>
+              ctx.isBot(message, 'atlas') &&
+              (message.mentions ?? []).some((mention) => mention.botSlug === ctx.slug('nexus')),
+          );
+        const ask = ctx.woke('nexus', 'atlas');
+        const answer = ctx.woke('atlas', 'nexus');
+        return report && ask && answer ? [ask, answer, report] : undefined;
+      });
+    },
+  },
+  {
+    id: 'repeat-reports',
+    summary:
+      'Two tasks in a row in one Group each wake the coordinator, so dedup keeps later reports.',
+    areas: RUNTIME_AREAS,
+    bots: ['nexus', 'aura'],
+    async run(ctx) {
+      const group = await ctx.mentionsOnlyGroup(['nexus', 'aura']);
+      await ctx.humanSend(group, `请用一句话给出一个像素风 logo 的配色方案。${REPORT_RULE}`, [
+        'aura',
+      ]);
+      const first = await ctx.waitFor('first report wakes Nexus', () =>
+        ctx.messages(group).find((message) => ctx.mentionedAndWoken(message, 'aura', 'nexus')),
+      );
+      await ctx.humanSend(group, `再用一句话给出一个赛博朋克风的配色方案。${REPORT_RULE}`, [
+        'aura',
+      ]);
+      await ctx.waitFor('second report wakes Nexus again', () => {
+        const second = ctx
+          .messages(group)
+          .find(
+            (message) =>
+              message.id !== first.id &&
+              message.channelRevision > first.channelRevision &&
+              ctx.mentionedAndWoken(message, 'aura', 'nexus'),
+          );
+        return second ? [first, second] : undefined;
+      });
+    },
+  },
+  {
+    id: 'unmentioned-stay-asleep',
+    summary:
+      'A worker that answers the Human without @ wakes no colleague in a mentions-only Group.',
+    areas: RUNTIME_AREAS,
+    bots: ['nexus', 'aura', 'atlas'],
+    async run(ctx) {
+      const group = await ctx.mentionsOnlyGroup(['nexus', 'aura', 'atlas']);
+      await ctx.humanSend(
+        group,
+        '请直接回复我：用一句话给出一个像素风 logo 的配色方案。这次不需要 @ 或通知任何同事。',
+        ['aura'],
+      );
+      const reply = await ctx.waitFor('Aura replies', () =>
+        ctx.messages(group).find((message) => ctx.isBot(message, 'aura')),
+      );
+      await ctx.settle(30);
+      const woken = ctx
+        .messages(group)
+        .filter((message) => message.channelRevision >= reply.channelRevision)
+        .flatMap((message) => message.deliveries ?? [])
+        .filter(
+          (delivery) =>
+            [ctx.slug('nexus'), ctx.slug('atlas')].includes(delivery.botSlug) &&
+            ['running', 'retryable', 'needs-repair', 'handled'].includes(delivery.state),
+        );
+      if (woken.length > 0)
+        throw new Error(`a colleague woke without a mention: ${JSON.stringify(woken)}`);
+    },
+  },
+  {
+    id: 'long-task-reports',
+    summary:
+      'A multi-phase DM task with a one-minute step gets a receipt before the work starts, progress while it runs and a final result.',
+    areas: [...RUNTIME_AREAS, 'packages/core/src/runtime/dsh-bot-agent-adapter.ts'],
+    bots: ['aura'],
+    async run(ctx) {
+      const dm = await ctx.dm('aura');
+      const files = ['drafts/palette.md', 'drafts/render.log', 'drafts/summary.md'];
+      await ctx.humanSend(
+        dm,
+        `这是一个分三个阶段的长任务，请在你的记忆仓库里依次完成：阶段 1：写 ${files[0]}，列出 5 个像素风配色，每个含 3 个十六进制色值和一句说明；阶段 2：在记忆仓库目录运行 \`sleep 60 && echo rendered > ${files[1]}\` 模拟导出预览图，这一步大约要一分钟；阶段 3：写 ${files[2]}，挑出最好的一组并说明理由。全部完成后告诉我结果。`,
+      );
+      const [first, , last] = await ctx.waitFor('all three phase files are written', () => {
+        const times = files.map((file) => ctx.memoryFileTime('aura', file));
+        return times.every((time) => time !== undefined) ? times : undefined;
+      });
+      const replies = await ctx.waitFor('a final report after the last phase', () => {
+        const messages = ctx.messages(dm).filter((message) => ctx.isBot(message, 'aura'));
+        return messages.some((message) => Date.parse(message.at) > last) ? messages : undefined;
+      });
+      const at = replies.map((message) => Date.parse(message.at));
+      if (!at.some((time) => time < first))
+        throw new Error('no receipt was sent before the first phase started');
+      if (!at.some((time) => time > first && time < last))
+        throw new Error('no progress was reported while the later phases ran');
+    },
+  },
+  {
+    id: 'department-task',
+    summary:
+      'A Human hands one task to a Group where every Bot wakes on every message; the colleagues start, work it through together, deliver, and then go quiet.',
+    areas: [...RUNTIME_AREAS, 'packages/core/src/runtime/dsh-bot-agent-adapter.ts'],
+    bots: ['nexus', 'aura', 'atlas', 'vera'],
+    async run(ctx) {
+      const group = await ctx.group(['nexus', 'aura', 'atlas', 'vera'], 'all');
+      await ctx.humanSend(
+        group,
+        '部门任务：为新游戏《像素远征》做一份发布方案。美工 Aura 给出一套像素风配色（3 个色值），叙事 Atlas 写 3 句宣传口号，质检 Vera 审核两份产出并对每份至少提一条修改意见，Aura 和 Atlas 按意见修改，最后总控 Nexus 汇总成最终方案发在群里，以「【最终方案】」开头。由 Nexus 负责推进，大家自己协调。',
+      );
+      const isBot = (message) =>
+        ['nexus', 'aura', 'atlas', 'vera'].some((key) => ctx.isBot(message, key));
+      const final = await ctx.waitFor(
+        'Nexus posts the final plan after everyone contributed',
+        () => {
+          const messages = ctx.messages(group);
+          const done = messages.find(
+            (message) =>
+              ctx.isBot(message, 'nexus') && /^(?:@\S+\s*)*【最终方案】/.test(message.body.trim()),
+          );
+          const everyone = ['aura', 'atlas', 'vera'].every((key) =>
+            messages.some((message) => ctx.isBot(message, key)),
+          );
+          return done && everyone ? done : undefined;
+        },
+      );
+      const revised = ['aura', 'atlas'].every(
+        (key) =>
+          ctx
+            .messages(group)
+            .filter(
+              (message) =>
+                ctx.isBot(message, key) && message.channelRevision < final.channelRevision,
+            ).length >= 2,
+      );
+      if (!revised) throw new Error('Aura and Atlas did not both revise after the review');
+      const quietBy = Date.now() + 300_000;
+      for (;;) {
+        await ctx.settle(10);
+        const newest = Date.parse(ctx.messages(group).filter(isBot).at(0)?.at ?? final.at);
+        if (Date.now() - newest >= 60_000) break;
+        if (Date.now() >= quietBy)
+          throw new Error('the Group had not gone quiet five minutes after the final plan');
+      }
+      const after = ctx
+        .messages(group)
+        .filter((message) => isBot(message) && message.channelRevision > final.channelRevision);
+      const total = ctx.messages(group).filter(isBot).length;
+      ctx.note({ botMessages: total, afterFinal: after.length });
+      if (after.length > 2)
+        throw new Error(`the Group kept talking after the final plan: ${after.length} messages`);
+    },
+  },
+  {
+    id: 'review-rounds',
+    summary:
+      'A reviewer sends the work back to a colleague three times from one Human kickoff, and every round wakes the colleague (#2872).',
+    areas: RUNTIME_AREAS,
+    bots: ['nexus', 'aura'],
+    async run(ctx) {
+      const group = await ctx.mentionsOnlyGroup(['nexus', 'aura']);
+      await ctx.humanSend(
+        group,
+        '请你和美工 Aura 迭代一个像素风 logo 的配色，一共三轮：第 1 轮请她给出初版；第 2 轮无论初版如何都请她改成暖色调；第 3 轮请她再加一个强调色。每一轮都在群里 @美工 Aura 提出要求，等她 @ 你汇报后再提下一轮。第三版完成后在群里简短总结。大家都只在被 @ 时才会被唤醒，Aura 每次改完必须 @总控 Nexus 汇报。',
+        ['nexus'],
+      );
+      await ctx.waitFor('Nexus wakes Aura three times and Aura reports back each time', () => {
+        const messages = ctx.messages(group);
+        const asks = messages.filter((message) => ctx.mentionedAndWoken(message, 'nexus', 'aura'));
+        const reports = messages.filter((message) =>
+          ctx.mentionedAndWoken(message, 'aura', 'nexus'),
+        );
+        return asks.length >= 3 && reports.length >= 3 ? [...asks, ...reports] : undefined;
+      });
+    },
+  },
+  {
+    id: 'tob-share-draft-secret',
+    summary:
+      'Tob reviews a Share Draft, asks the Human about a planted secret, drops it on the answer, and leaves the source Memory untouched (#3060).',
+    areas: [
+      'packages/core/src/marketplace/',
+      'packages/core/src/tob/',
+      'packages/core/src/bots/cli-share-draft.ts',
+      'scripts/e2e-llm-scenarios.mjs',
+    ],
+    bots: ['atlas'],
+    async run(ctx) {
+      const slug = ctx.slug('atlas');
+      const memory = ctx.memoryDir('atlas');
+      const secret = 'notes/keys.md';
+      mkdirSync(join(memory, 'notes'), { recursive: true });
+      writeFileSync(
+        join(memory, secret),
+        '# 部署笔记\n\nOpenAI key: sk-e2eplanted0000secret0000value\n',
+      );
+      writeFileSync(join(memory, 'notes/story.md'), '# 故事\n\n一只像素猫在雨夜里找到回家的路。\n');
+      const git = (...args) =>
+        execFileSync('git', ['-c', 'user.name=e2e', '-c', 'user.email=e2e@local', ...args], {
+          cwd: memory,
+          encoding: 'utf8',
+        });
+      git('add', '-A');
+      git('commit', '-q', '-m', 'e2e share fixture');
+      const head = git('rev-parse', 'HEAD').trim();
+      const before = readFileSync(join(memory, secret), 'utf8');
+      const started = await ctx.host('shareDraftStart', { slug });
+      const flagged = started.files.find((file) => file.path === secret);
+      if (!flagged || flagged.flags.length === 0) throw new Error('planted secret was not flagged');
+      const tob = await ctx.tob();
+      await ctx.humanSend(
+        tob,
+        `帮我把「${CAST.atlas.displayName}」分享出去：逐个检查它的分享草稿，看起来涉及隐私的内容问我保留、改写还是删掉。（Bot ID：${slug}）`,
+      );
+      const answered = new Set();
+      const draft = await ctx.waitFor(
+        'Tob asks about the planted secret and the Share Draft finishes with it dropped',
+        async () => {
+          for (const message of ctx.messages(tob)) {
+            const request = message.userQuestionRequest;
+            if (request === undefined || answered.has(message.id)) continue;
+            answered.add(message.id);
+            const answers = request.questions.map((question) => {
+              const text = `${question.header ?? ''} ${question.question} ${question.detail ?? ''}`;
+              const options = (question.options ?? []).map((option) => option.label);
+              const aboutSecret = text.includes('keys.md') || /sk-|key|密钥/iu.test(text);
+              const wanted = aboutSecret ? /drop|删|移除|不分享/iu : /keep|保留/iu;
+              const pick = options.find((label) => wanted.test(label));
+              return pick === undefined
+                ? {
+                    id: question.id,
+                    selected: [],
+                    custom: aboutSecret ? '删掉这个文件' : '保留',
+                  }
+                : { id: question.id, selected: [pick] };
+            });
+            ctx.note({
+              [`question-${message.id}`]: {
+                questions: request.questions,
+                answers,
+              },
+            });
+            await ctx.host('userQuestionAnswer', {
+              channelId: tob,
+              messageId: message.id,
+              answer: { answers },
+            });
+          }
+          const current = await ctx.host('shareDraftGet', { slug }).catch(() => undefined);
+          return answered.size > 0 && current?.state === 'ready' ? current : undefined;
+        },
+      );
+      const file = draft.files.find((entry) => entry.path === secret);
+      if (file?.status !== 'dropped') throw new Error(`planted secret ended ${file?.status}`);
+      if (readFileSync(join(memory, secret), 'utf8') !== before)
+        throw new Error('source Memory file changed');
+      if (git('rev-parse', 'HEAD').trim() !== head || git('status', '--porcelain').trim() !== '')
+        throw new Error('source Memory repository changed');
+      ctx.note({ draft: draft.summary });
+    },
+  },
+  {
+    id: 'browser-youtube-search',
+    summary:
+      'A Human asks a Bot with Browser Access to search YouTube; its current Bot Browser tab ends on the results page for that query (#3377).',
+    areas: [
+      'packages/browser/',
+      'packages/computer/',
+      'packages/core/src/runtime/',
+      'scripts/e2e-llm-scenarios.mjs',
+    ],
+    bots: ['aura'],
+    external: true,
+    async run(ctx) {
+      const slug = ctx.slug('aura');
+      await ctx.host('browserAccessSet', { slug, enabled: true });
+      const query = 'lofi hip hop';
+      const dm = await ctx.dm('aura');
+      await ctx.humanSend(
+        dm,
+        `打开 YouTube（https://www.youtube.com），在页面的搜索框里搜索「${query}」，停在搜索结果页，然后告诉我前三个视频的标题。`,
+      );
+      try {
+        const observed = await ctx.waitFor(
+          'The current Bot Browser tab is a YouTube results page for the query and the Bot replied',
+          async () => {
+            const observation = await ctx.browserObservation(slug).catch(() => undefined);
+            const tab = (observation?.tabs ?? []).find((entry) => entry.current);
+            const onResults =
+              tab !== undefined && youtubeResultsQuery(tab.url) === query.toLowerCase();
+            const replied = ctx.messages(dm).some((message) => ctx.isBot(message, 'aura'));
+            return onResults && replied ? { url: tab.url, title: tab.title } : undefined;
+          },
+        );
+        ctx.note({ result: observed });
+      } finally {
+        const calls = await ctx.toolCalls('aura').catch(() => []);
+        ctx.note({
+          finalBrowser: await ctx.browserObservation(slug).catch((error) => String(error)),
+          browserCalls: calls
+            .filter((call) => call.name.startsWith('browser_'))
+            .map((call) => ({
+              name: call.name,
+              isError: call.isError,
+              arguments: call.arguments,
+              result: call.isError ? call.result.slice(0, 400) : undefined,
+            })),
+        });
+        await ctx.noteDiagnostics('aura');
+      }
+    },
+  },
+];
+
+export function youtubeResultsQuery(url) {
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return undefined;
+  }
+  if (!/(^|\.)youtube\.com$/u.test(parsed.hostname) || parsed.pathname !== '/results')
+    return undefined;
+  const value = parsed.searchParams.get('search_query');
+  return value === null ? undefined : value.trim().replace(/\s+/gu, ' ').toLowerCase();
+}
+
+export function parseScenarioArgs(argv) {
+  const options = {
+    name: 'llm-e2e',
+    launch: false,
+    scenarios: [],
+    changedFrom: undefined,
+    attempts: 2,
+    runs: undefined,
+    models: [],
+    baseline: undefined,
+    compare: undefined,
+    settleSeconds: 12,
+    timeoutSeconds: 240,
+    report: undefined,
+    list: false,
+    help: false,
+  };
+  let attemptsGiven = false;
+  for (let index = 0; index < argv.length; index += 1) {
+    const flag = argv[index];
+    const value = () => {
+      const next = argv[++index];
+      if (next === undefined) throw new Error(`${flag} needs a value`);
+      return next;
+    };
+    switch (flag) {
+      case '--name':
+        options.name = value();
+        if (!/^[a-z0-9][a-z0-9-]*$/u.test(options.name))
+          throw new Error('--name must be lowercase letters, digits and dashes');
+        break;
+      case '--launch':
+        options.launch = true;
+        break;
+      case '--scenario': {
+        const id = value();
+        if (!SCENARIOS.some((scenario) => scenario.id === id))
+          throw new Error(`unknown scenario ${id}`);
+        options.scenarios.push(id);
+        break;
+      }
+      case '--changed-from':
+        options.changedFrom = value();
+        break;
+      case '--attempts':
+        attemptsGiven = true;
+        options.attempts = Number(value());
+        if (!Number.isInteger(options.attempts) || options.attempts < 1 || options.attempts > 5)
+          throw new Error('--attempts must be an integer from 1 to 5');
+        break;
+      case '--runs':
+        options.runs = Number(value());
+        if (!Number.isInteger(options.runs) || options.runs < 1 || options.runs > 20)
+          throw new Error('--runs must be an integer from 1 to 20');
+        break;
+      case '--model': {
+        const route = parseModelRoute(value());
+        if (options.models.some((entry) => modelLabel(entry) === modelLabel(route)))
+          throw new Error(`--model ${modelLabel(route)} is given twice`);
+        options.models.push(route);
+        break;
+      }
+      case '--baseline':
+        options.baseline = value();
+        break;
+      case '--compare':
+        options.compare = [value(), value()];
+        break;
+      case '--settle':
+        options.settleSeconds = Number(value());
+        if (
+          !Number.isInteger(options.settleSeconds) ||
+          options.settleSeconds < 0 ||
+          options.settleSeconds > 120
+        )
+          throw new Error('--settle must be an integer from 0 to 120');
+        break;
+      case '--timeout':
+        options.timeoutSeconds = Number(value());
+        if (!Number.isInteger(options.timeoutSeconds) || options.timeoutSeconds < 10)
+          throw new Error('--timeout must be at least 10 seconds');
+        break;
+      case '--report':
+        options.report = value();
+        break;
+      case '--list':
+        options.list = true;
+        break;
+      case '--help':
+      case '-h':
+        options.help = true;
+        break;
+      default:
+        throw new Error(`unknown option ${flag}`);
+    }
+  }
+  if (attemptsGiven && options.runs !== undefined)
+    throw new Error('--runs replaces --attempts; pass one of them');
+  if (options.models.length === 0) options.models.push(parseModelRoute(DEFAULT_MODEL));
+  return options;
+}
+
+export function parseModelRoute(spec) {
+  if (spec === 'host-default') return undefined;
+  const match = /^([^/@\s]+)\/([^@\s]+)(?:@([a-z0-9-]+))?$/u.exec(spec);
+  if (!match) throw new Error(`--model must be provider/model[@effort], got ${spec}`);
+  const [, provider, model, reasoningEffort] = match;
+  return { provider, model, ...(reasoningEffort ? { reasoningEffort } : {}) };
+}
+
+export function modelLabel(route) {
+  if (route === undefined) return 'host-default';
+  return `${route.provider}/${route.model}${route.reasoningEffort ? `@${route.reasoningEffort}` : ''}`;
+}
+
+export function selectScenarios(options, changedFiles) {
+  let selected = SCENARIOS.filter((scenario) => scenario.external !== true);
+  if (options.scenarios.length > 0)
+    selected = SCENARIOS.filter((scenario) => options.scenarios.includes(scenario.id));
+  if (changedFiles !== undefined)
+    selected = selected.filter((scenario) =>
+      changedFiles.some((file) => scenario.areas.some((area) => file.startsWith(area))),
+    );
+  return selected;
+}
+
+function changedSince(ref) {
+  return execFileSync('git', ['diff', '--name-only', `${ref}...HEAD`], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+  })
+    .split('\n')
+    .filter(Boolean);
+}
+
+const delay = (ms) => new Promise((done) => setTimeout(done, ms));
+
+export const TOKEN_BUCKETS = ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens'];
+
+export function sumHostRows(rows) {
+  const usage = {
+    routes: [...new Set(rows.map((row) => `${row.provider}/${row.model}`))].sort(),
+  };
+  for (const bucket of [...TOKEN_BUCKETS, 'totalTokens'])
+    usage[bucket] = rows.some(
+      (row) => typeof row[bucket] !== 'number' || (row.unknownBuckets?.[bucket] ?? 0) > 0,
+    )
+      ? null
+      : rows.reduce((total, row) => total + row[bucket], 0);
+  return usage;
+}
+
+export function sumSessionTotals(records, slugs) {
+  const usage = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+  };
+  const routes = new Set();
+  let sessions = 0;
+  for (const record of records) {
+    const cwd = record?.identity?.cwd?.replaceAll('\\', '/') ?? '';
+    if (!slugs.some((slug) => cwd.includes(`/bots/${slug}/`))) continue;
+    const totals = record.rows?.tokenUsage?.val?.totals;
+    if (totals === undefined) continue;
+    sessions += 1;
+    usage.inputTokens += totals.uncachedInputTokens ?? 0;
+    usage.outputTokens += totals.outputTokens ?? 0;
+    usage.cacheReadTokens += totals.cacheReadTokens ?? 0;
+    usage.cacheWriteTokens += totals.cacheWriteTokens ?? 0;
+    const used = record.rows?.modelSelection?.val?.lastUsed;
+    if (used?.provider && used?.model) routes.add(`${used.provider}/${used.model}`);
+  }
+  usage.totalTokens = TOKEN_BUCKETS.reduce((total, bucket) => total + usage[bucket], 0);
+  return { ...usage, sessions, routes: [...routes].sort() };
+}
+
+export function readSessionRecords(home) {
+  const folder = join(home, 'storages', 'session_projcache', 'sessions');
+  if (!existsSync(folder)) return [];
+  return readdirSync(folder)
+    .filter((file) => file.endsWith('.json'))
+    .flatMap((file) => {
+      try {
+        return [JSON.parse(readFileSync(join(folder, file), 'utf8')).record];
+      } catch {
+        return [];
+      }
+    });
+}
+
+function cacheHitRate(tokens) {
+  const prompt = tokens.inputTokens + tokens.cacheReadTokens + tokens.cacheWriteTokens;
+  return prompt > 0 ? Number((tokens.cacheReadTokens / prompt).toFixed(4)) : null;
+}
+
+export function summarizeAttempts(attempts) {
+  const passed = attempts.filter((attempt) => attempt.result === 'pass').length;
+  const measured = attempts.filter((attempt) => attempt.usage !== undefined);
+  const mean = Object.fromEntries(
+    [...TOKEN_BUCKETS, 'totalTokens'].map((bucket) => [
+      bucket,
+      measured.length === 0
+        ? null
+        : Math.round(
+            measured.reduce((total, attempt) => total + attempt.usage[bucket], 0) / measured.length,
+          ),
+    ]),
+  );
+  const totals = measured.map((attempt) => attempt.usage.totalTokens);
+  return {
+    runs: attempts.length,
+    passed,
+    passRate: attempts.length === 0 ? null : Number((passed / attempts.length).toFixed(4)),
+    meanTokens: mean,
+    minTotalTokens: totals.length ? Math.min(...totals) : null,
+    maxTotalTokens: totals.length ? Math.max(...totals) : null,
+    cacheHitRate: mean.totalTokens === null ? null : cacheHitRate(mean),
+    usageComplete: measured.length === attempts.length && measured.every((a) => a.usage.settled),
+    hostMatches: measured.every((attempt) => attempt.usage.hostMatches),
+  };
+}
+
+const entryKey = (entry) => `${entry.id} ${entry.model}`;
+
+export function compareReports(baseline, current) {
+  const before = new Map(baseline.scenarios.map((entry) => [entryKey(entry), entry]));
+  const after = new Map(current.scenarios.map((entry) => [entryKey(entry), entry]));
+  const keys = [...new Set([...before.keys(), ...after.keys()])];
+  return keys.map((key) => {
+    const a = before.get(key)?.stats;
+    const b = after.get(key)?.stats;
+    const [id, model] = key.split(' ');
+    const row = { id, model, baseline: a ?? null, current: b ?? null };
+    if (a && b) {
+      row.passRateDelta =
+        a.passRate === null || b.passRate === null
+          ? null
+          : Number((b.passRate - a.passRate).toFixed(4));
+      row.tokenDelta = Object.fromEntries(
+        [...TOKEN_BUCKETS, 'totalTokens'].map((bucket) => {
+          const x = a.meanTokens[bucket];
+          const y = b.meanTokens[bucket];
+          return [bucket, x === null || y === null ? null : y - x];
+        }),
+      );
+      const x = a.meanTokens.totalTokens;
+      const y = b.meanTokens.totalTokens;
+      row.totalTokensChange = x && y !== null ? Number(((y - x) / x).toFixed(4)) : null;
+    }
+    return row;
+  });
+}
+
+const count = (value) => (value === null || value === undefined ? '–' : value.toLocaleString('en'));
+const percent = (value) =>
+  value === null || value === undefined ? '–' : `${Math.round(value * 100)}%`;
+const signed = (value, format = count) =>
+  value === null || value === undefined ? '–' : `${value > 0 ? '+' : ''}${format(value)}`;
+
+export function renderMarkdown(report, comparison) {
+  const lines = [
+    `# Real-model scenarios: ${report.result}`,
+    '',
+    `Commit \`${report.commit.slice(0, 12)}\`. Tokens are the mean per run across every Bot in the scenario; input is uncached input.`,
+    '',
+    '| Scenario | Model | Passed | Input | Output | Cache read | Cache write | Total | Cache hit |',
+    '| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |',
+  ];
+  for (const entry of report.scenarios) {
+    const { stats } = entry;
+    const tokens = stats.meanTokens;
+    lines.push(
+      `| ${entry.id} | ${entry.model} | ${stats.passed}/${stats.runs} | ${count(tokens.inputTokens)} | ${count(tokens.outputTokens)} | ${count(tokens.cacheReadTokens)} | ${count(tokens.cacheWriteTokens)} | ${count(tokens.totalTokens)}${stats.usageComplete ? '' : ' (unsettled)'}${stats.hostMatches ? '' : ' (Host differs)'} | ${percent(stats.cacheHitRate)} |`,
+    );
+  }
+  if (comparison !== undefined) {
+    lines.push(
+      '',
+      `## Against baseline \`${comparison.baselineCommit?.slice(0, 12) ?? 'unknown'}\``,
+      '',
+      '| Scenario | Model | Pass rate | Δ input | Δ output | Δ cache read | Δ cache write | Δ total |',
+      '| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |',
+    );
+    for (const row of comparison.rows) {
+      if (!row.baseline || !row.current) {
+        lines.push(
+          `| ${row.id} | ${row.model} | ${row.baseline ? 'not run now' : 'new'} | | | | | |`,
+        );
+        continue;
+      }
+      const delta = row.tokenDelta;
+      lines.push(
+        `| ${row.id} | ${row.model} | ${percent(row.baseline.passRate)} → ${percent(row.current.passRate)} | ${signed(delta.inputTokens)} | ${signed(delta.outputTokens)} | ${signed(delta.cacheReadTokens)} | ${signed(delta.cacheWriteTokens)} | ${signed(delta.totalTokens)} (${signed(row.totalTokensChange, percent)}) |`,
+      );
+    }
+  }
+  return `${lines.join('\n')}\n`;
+}
+
+function localDay(date = new Date()) {
+  const month = `${date.getMonth() + 1}`.padStart(2, '0');
+  const day = `${date.getDate()}`.padStart(2, '0');
+  return `${date.getFullYear()}-${month}-${day}`;
+}
+
+async function sessionSnapshot(instance, sessionId) {
+  const WebSocket = installed('ws');
+  const origin = new URL(instance.url).origin;
+  const socket = new WebSocket(`${origin.replace(/^http/u, 'ws')}/api/remote.mux`, {
+    headers: { cookie: cookieFor(instance.home) },
+  });
+  let timeout;
+  try {
+    return await new Promise((done, fail) => {
+      timeout = setTimeout(() => fail(new Error('Session snapshot timed out')), 20_000);
+      socket.once('error', fail);
+      socket.once('open', () =>
+        socket.send(
+          JSON.stringify({
+            type: 'open',
+            streamId: crypto.randomUUID(),
+            endpoint: 'session/follow',
+            payload: {
+              args: {
+                request: {
+                  address: { kind: 'session', sessionId },
+                  maxMessages: 100,
+                },
+              },
+            },
+          }),
+        ),
+      );
+      socket.on('message', (raw) => {
+        const frame = JSON.parse(String(raw));
+        if (frame.type === 'error') fail(new Error(JSON.stringify(frame.error)));
+        if (frame.type === 'item' && frame.value.type === 'snapshot') done(frame.value);
+      });
+    });
+  } finally {
+    clearTimeout(timeout);
+    socket.terminate();
+  }
+}
+
+export function createContext(instance, scenario, timeoutSeconds, log, presetId) {
+  const slugs = {};
+  const call = (method, args) => rpc(instance, `botharness/${method}`, args);
+  let messageCache = new Map();
+  const approved = new Set();
+  const ctx = {
+    async setup() {
+      for (const key of scenario.bots) {
+        const cast = CAST[key];
+        const created = await call('create', {
+          displayName: cast.displayName,
+          persona: cast.persona,
+        });
+        if (typeof created.bot?.slug !== 'string') throw new Error(`could not create ${key}`);
+        slugs[key] = created.bot.slug;
+        await call('channelDm', {
+          slug: created.bot.slug,
+          displayName: cast.displayName,
+        });
+        if (presetId !== undefined)
+          await call('modelPresetApply', { slug: created.bot.slug, presetId });
+      }
+      log.bots = Object.fromEntries(Object.entries(slugs));
+    },
+    async hostUsage(start) {
+      const filter = { start, end: localDay() };
+      const rows = [];
+      let ready = true;
+      for (const slug of Object.values(slugs)) {
+        const result = await call('profileUsage', {
+          channelId: `dm-${slug}`,
+          filter,
+        });
+        if (result.freshness !== 'ready') ready = false;
+        rows.push(...result.rows);
+      }
+      return { ...sumHostRows(rows), ready, rows };
+    },
+    async settledUsage(start, settleSeconds) {
+      const deadline = Date.now() + (settleSeconds + 60) * 1000;
+      const bots = Object.values(slugs);
+      let last;
+      let stableSince = Date.now();
+      for (;;) {
+        const usage = sumSessionTotals(readSessionRecords(instance.home), bots);
+        const host = await ctx.hostUsage(start);
+        const moving =
+          last === undefined ||
+          last.usage.totalTokens !== usage.totalTokens ||
+          last.host.totalTokens !== host.totalTokens ||
+          !host.ready;
+        if (moving) stableSince = Date.now();
+        last = { usage, host };
+        const settled = !moving && Date.now() - stableSince >= settleSeconds * 1000;
+        if (settled || Date.now() >= deadline) {
+          const { ready: _ready, ...hostUsage } = host;
+          return {
+            ...usage,
+            settled,
+            host: hostUsage,
+            hostMatches: host.totalTokens === null || host.totalTokens === usage.totalTokens,
+          };
+        }
+        await delay(3000);
+      }
+    },
+    slug: (key) => slugs[key],
+    host: call,
+    async hostGet(path) {
+      const origin = new URL(instance.url).origin;
+      const response = await fetch(`${origin}${path}`, {
+        signal: AbortSignal.timeout(30_000),
+        headers: { connection: 'close', cookie: cookieFor(instance.home) },
+      });
+      if (response.status !== 200) throw new Error(`GET ${path} HTTP ${response.status}`);
+      return response.json();
+    },
+    async browserObservation(slug) {
+      const { frame: _frame, ...observation } = await ctx.hostGet(
+        `/api/browser/observation?slug=${encodeURIComponent(slug)}`,
+      );
+      return observation;
+    },
+    async noteDiagnostics(key) {
+      const owner = encodeURIComponent(`bot:${slugs[key]}`);
+      const read = (path) => ctx.hostGet(path).catch((error) => ({ error: String(error) }));
+      ctx.note({
+        diagnostics: {
+          botLogs: await read(`/api/computer/logs?owner=${owner}&limit=200`),
+          computer: await read('/api/computer/diagnostics'),
+        },
+      });
+    },
+    async toolCalls(key) {
+      const { sessions } = await call('sessions', { slug: slugs[key] });
+      const calls = [];
+      const ordered = [...sessions].sort(
+        (a, b) =>
+          String(a.createdAt).localeCompare(String(b.createdAt)) ||
+          a.sessionId.localeCompare(b.sessionId),
+      );
+      for (const { sessionId } of ordered) {
+        const events = (await sessionSnapshot(instance, sessionId)).records.map(
+          (record) => record.event,
+        );
+        for (const event of events) {
+          if (event.type !== 'tool/call') continue;
+          const result = events.find(
+            (entry) =>
+              entry.type === 'tool/result' && entry.data.message.toolCallId === event.data.callId,
+          )?.data.message;
+          let args;
+          try {
+            args = JSON.parse(event.data.arguments);
+          } catch {
+            args = event.data.arguments;
+          }
+          calls.push({
+            name: event.data.name,
+            arguments: args,
+            hasResult: result !== undefined,
+            isError: result?.isError === true,
+            result: (result?.content ?? []).map((part) => part.text ?? '').join(''),
+          });
+        }
+      }
+      return calls;
+    },
+    memoryDir: (key) => join(instance.home, 'botharness', 'bots', slugs[key], 'memory'),
+    async tob() {
+      const home = await call('tobHome', {});
+      if (presetId !== undefined) await call('modelPresetApply', { slug: home.botSlug, presetId });
+      if (!log.channels.includes(home.channelId)) log.channels.push(home.channelId);
+      return home.channelId;
+    },
+    note(values) {
+      log.notes = { ...log.notes, ...values };
+    },
+    memoryFileTime(key, path) {
+      try {
+        return statSync(join(instance.home, 'botharness', 'bots', slugs[key], 'memory', path))
+          .mtimeMs;
+      } catch {
+        return undefined;
+      }
+    },
+    isBot: (message, key) =>
+      message.author?.kind === 'bot' &&
+      message.author.slug === slugs[key] &&
+      !message.sessionFailure,
+    async dm(key) {
+      const dm = await call('channelDm', {
+        slug: slugs[key],
+        displayName: CAST[key].displayName,
+      });
+      return dm.channel.id;
+    },
+    async mentionsOnlyGroup(keys) {
+      return ctx.group(keys, 'mentions');
+    },
+    async group(keys, mode) {
+      const created = await call('channelCreate', {
+        name: `LLM e2e ${scenario.id} ${Date.now()}`,
+        members: keys.map((key) => slugs[key]),
+      });
+      const channelId = created.channel.id;
+      for (const key of keys)
+        await call('channelGroupWakeSet', {
+          channelId,
+          botSlug: slugs[key],
+          mode,
+          count: 5,
+          intervalSeconds: 30,
+        });
+      log.channels.push(channelId);
+      return channelId;
+    },
+    async humanSend(channelId, text, mentionKeys = []) {
+      let body = '';
+      const mentions = [];
+      for (const key of mentionKeys) {
+        const label = CAST[key].displayName;
+        mentions.push({
+          botSlug: slugs[key],
+          label,
+          start: body.length,
+          end: body.length + 1 + label.length,
+        });
+        body += `@${label} `;
+      }
+      body += text;
+      await call('channelSend', {
+        channelId,
+        body,
+        ...(mentions.length ? { mentions } : {}),
+      });
+      if (!log.channels.includes(channelId)) log.channels.push(channelId);
+    },
+    messages: (channelId) => messageCache.get(channelId) ?? [],
+    woke(fromKey, toKey) {
+      return [...messageCache.values()]
+        .flat()
+        .find(
+          (message) =>
+            ctx.isBot(message, fromKey) &&
+            (message.deliveries ?? []).some(
+              (delivery) => delivery.botSlug === slugs[toKey] && delivery.state === 'handled',
+            ),
+        );
+    },
+    mentionedAndWoken(message, fromKey, toKey) {
+      return (
+        ctx.isBot(message, fromKey) &&
+        (message.mentions ?? []).some((mention) => mention.botSlug === slugs[toKey]) &&
+        (message.deliveries ?? []).some(
+          (delivery) => delivery.botSlug === slugs[toKey] && delivery.state === 'handled',
+        )
+      );
+    },
+    async refresh() {
+      messageCache = new Map();
+      const bots = Object.values(slugs);
+      const { channels } = await call('channels', {});
+      for (const channel of channels)
+        if (
+          channel.id.startsWith('dm-bots-') &&
+          (channel.members ?? []).length === 2 &&
+          channel.members.every((slug) => bots.includes(slug)) &&
+          !log.botDms.includes(channel.id)
+        )
+          log.botDms.push(channel.id);
+      for (const channelId of [...log.channels, ...log.botDms]) {
+        const page = await call('channelMessages', { channelId, limit: 100 });
+        messageCache.set(channelId, page.messages);
+      }
+      const dms = Object.values(slugs).map((slug) => `dm-${slug}`);
+      for (const channelId of [...log.channels, ...dms]) {
+        const messages =
+          messageCache.get(channelId) ??
+          (await call('channelMessages', { channelId, limit: 50 }).catch(() => ({ messages: [] })))
+            .messages;
+        messageCache.set(channelId, messages);
+        for (const message of messages) {
+          if (message.toolApprovalRequest === undefined || approved.has(message.id)) continue;
+          approved.add(message.id);
+          const decided = await call('toolApprovalDecide', {
+            channelId,
+            messageId: message.id,
+            outcome: 'allowed-once',
+          }).catch((error) => ({
+            accepted: false,
+            error: String(error?.message ?? error),
+          }));
+          log.approvals.push({
+            botSlug: message.author.slug,
+            toolName: message.toolApprovalRequest.toolName,
+            accepted: decided.accepted === true,
+          });
+        }
+      }
+    },
+    async settle(seconds) {
+      await delay(seconds * 1000);
+      await ctx.refresh();
+    },
+    async waitFor(label, predicate) {
+      const deadline = Date.now() + timeoutSeconds * 1000;
+      while (Date.now() < deadline) {
+        await ctx.refresh();
+        const failure = [...messageCache.values()].flat().find((message) => message.sessionFailure);
+        if (failure) throw new Error(failure.body);
+        const found = await predicate();
+        if (found) {
+          log.proof = { label, found };
+          return found;
+        }
+        await delay(3000);
+      }
+      throw new Error(`timed out waiting for: ${label}`);
+    },
+  };
+  return ctx;
+}
+
+function summarize(message) {
+  return {
+    id: message.id,
+    author: message.author?.kind === 'bot' ? message.author.slug : message.author?.kind,
+    body: message.body,
+    at: message.at,
+    ...(message.sessionFailure ? { sessionFailure: message.sessionFailure } : {}),
+    mentions: message.mentions?.map((mention) => mention.botSlug),
+    deliveries: message.deliveries,
+  };
+}
+
+async function runScenario(instance, scenario, options, route, presetId) {
+  const attempts = [];
+  const model = modelLabel(route);
+  const total = options.runs ?? options.attempts;
+  for (let attempt = 1; attempt <= total; attempt += 1) {
+    const log = {
+      attempt,
+      channels: [],
+      botDms: [],
+      approvals: [],
+      startedAt: new Date().toISOString(),
+    };
+    const ctx = createContext(instance, scenario, options.timeoutSeconds, log, presetId);
+    const startDay = localDay();
+    try {
+      await ctx.setup();
+      await scenario.run(ctx);
+      log.result = 'pass';
+    } catch (error) {
+      log.result = 'fail';
+      log.error = error instanceof Error ? error.message : String(error);
+    }
+    try {
+      if (log.bots !== undefined)
+        log.usage = await ctx.settledUsage(startDay, options.settleSeconds);
+    } catch (error) {
+      log.usageError = error instanceof Error ? error.message : String(error);
+    }
+    if (
+      route !== undefined &&
+      log.usage?.routes.some((entry) => entry !== `${route.provider}/${route.model}`)
+    )
+      log.routeMismatch = log.usage.routes;
+    log.transcript = Object.fromEntries(
+      [...log.channels, ...log.botDms].map((channelId) => [
+        channelId,
+        ctx.messages(channelId).map(summarize),
+      ]),
+    );
+    if (log.proof !== undefined)
+      log.proof.found = [log.proof.found].flat().map((message) => summarize(message));
+    log.finishedAt = new Date().toISOString();
+    attempts.push(log);
+    const tokens = log.usage
+      ? ` ${log.usage.totalTokens} tokens (in ${log.usage.inputTokens}, out ${log.usage.outputTokens}, cache read ${log.usage.cacheReadTokens}, cache write ${log.usage.cacheWriteTokens})`
+      : '';
+    const approvals = log.approvals.length
+      ? ` approved ${log.approvals.map((entry) => entry.toolName).join(', ')}`
+      : '';
+    console.error(
+      `${scenario.id} [${model}] ${options.runs ? 'run' : 'attempt'} ${attempt}: ${log.result}${log.error ? ` (${log.error})` : ''}${tokens}${approvals}`,
+    );
+    if (log.result === 'pass' && options.runs === undefined) break;
+  }
+  return {
+    id: scenario.id,
+    summary: scenario.summary,
+    model,
+    ...(route === undefined ? {} : { route }),
+    result: attempts.some((attempt) => attempt.result === 'pass') ? 'pass' : 'fail',
+    stats: summarizeAttempts(attempts),
+    attempts,
+  };
+}
+
+export async function presetFor(instance, route) {
+  const call = (method, args) => rpc(instance, `botharness/${method}`, args);
+  const { models } = await call('modelCatalog', {});
+  const known = models.find(
+    (entry) => entry.provider === route.provider && entry.model === route.model,
+  );
+  if (!known)
+    throw new Error(
+      `${modelLabel(route)} is not in the Host model catalog; available: ${models.map((entry) => `${entry.provider}/${entry.model}`).join(', ')}`,
+    );
+  if (
+    route.reasoningEffort !== undefined &&
+    !known.efforts?.some((effort) => effort.id === route.reasoningEffort)
+  )
+    throw new Error(`${modelLabel(route)}: effort ${route.reasoningEffort} is not offered`);
+  const { preset } = await call('modelPresetCreate', {
+    name: `LLM e2e ${modelLabel(route)} ${Date.now()}`,
+    orchestrator: route,
+    assignmentDefault: route,
+  });
+  return preset.id;
+}
+
+function verifyApp(args) {
+  const result = spawnSync(process.execPath, ['scripts/verify-app.mjs', ...args], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'inherit'],
+    timeout: 900_000,
+  });
+  if (result.status !== 0) throw new Error(`verify-app ${args[0]} failed`);
+  return JSON.parse(result.stdout);
+}
+
+async function main() {
+  const options = parseScenarioArgs(process.argv.slice(2));
+  if (options.help) {
+    console.log(usage);
+    return;
+  }
+  if (options.compare !== undefined) {
+    const [baseline, current] = options.compare.map((path) =>
+      JSON.parse(readFileSync(path, 'utf8')),
+    );
+    const rows = compareReports(baseline, current);
+    console.log(renderMarkdown(current, { baselineCommit: baseline.commit, rows }));
+    return;
+  }
+  if (options.list) {
+    console.log(
+      JSON.stringify(
+        SCENARIOS.map(({ id, summary, areas }) => ({ id, summary, areas })),
+        null,
+        2,
+      ),
+    );
+    return;
+  }
+  const baseline =
+    options.baseline === undefined ? undefined : JSON.parse(readFileSync(options.baseline, 'utf8'));
+  const changed = options.changedFrom === undefined ? undefined : changedSince(options.changedFrom);
+  const selected = selectScenarios(options, changed);
+  if (selected.length === 0) {
+    console.log(JSON.stringify({ result: 'skipped', reason: 'no scenario area changed' }));
+    return;
+  }
+  const paths = verifyPaths(options.name);
+  let launched = false;
+  if (options.launch) {
+    const started = verifyApp(['launch', '--name', options.name]);
+    launched = true;
+    if (!String(started.model ?? '').length || /missing/u.test(String(started.model)))
+      console.error(`warning: Host model credential is ${JSON.stringify(started.model)}`);
+  }
+  try {
+    if (!existsSync(paths.instance))
+      throw new Error(`no instance at ${paths.instance}; pass --launch or run verify-app launch`);
+    const instance = JSON.parse(readFileSync(paths.instance, 'utf8'));
+    const results = [];
+    const routes = options.models;
+    const reportPath = resolve(
+      options.report ??
+        join(
+          repoRoot,
+          '.humanlayer',
+          'llm-e2e',
+          `${new Date().toISOString().replace(/[:.]/gu, '-')}.json`,
+        ),
+    );
+    const summaryPath = reportPath.replace(/\.json$/u, '') + '.md';
+    mkdirSync(dirname(reportPath), { recursive: true });
+    const report = {
+      result: 'running',
+      model: instance.secret,
+      models: routes.map(modelLabel),
+      mode: options.runs === undefined ? { attempts: options.attempts } : { runs: options.runs },
+      commit: execFileSync('git', ['rev-parse', 'HEAD'], {
+        cwd: repoRoot,
+        encoding: 'utf8',
+      }).trim(),
+      ...(changed === undefined ? {} : { changedFrom: options.changedFrom }),
+      scenarios: results,
+    };
+    let comparison;
+    const save = () => {
+      comparison =
+        baseline === undefined
+          ? undefined
+          : {
+              baselineCommit: baseline.commit,
+              rows: compareReports(baseline, report),
+            };
+      if (comparison !== undefined) report.comparison = comparison;
+      writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
+      writeFileSync(summaryPath, renderMarkdown(report, comparison));
+    };
+    for (const route of routes) {
+      const presetId = route === undefined ? undefined : await presetFor(instance, route);
+      for (const scenario of selected) {
+        results.push(await runScenario(instance, scenario, options, route, presetId));
+        save();
+      }
+    }
+    report.result = results.every((item) => item.result === 'pass') ? 'pass' : 'fail';
+    save();
+    console.log(
+      JSON.stringify(
+        {
+          result: report.result,
+          report: reportPath,
+          summary: summaryPath,
+          scenarios: results.map(({ id, model, result, stats, attempts }) => ({
+            id,
+            model,
+            result,
+            passed: `${stats.passed}/${stats.runs}`,
+            meanTokens: stats.meanTokens,
+            cacheHitRate: stats.cacheHitRate,
+            attempts: attempts.map((attempt) => attempt.result),
+          })),
+        },
+        null,
+        2,
+      ),
+    );
+    if (report.result !== 'pass') process.exitCode = 1;
+  } finally {
+    if (launched) verifyApp(['stop', '--name', options.name]);
+  }
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    console.error(`e2e-llm-scenarios: ${error.message}`);
+    process.exit(1);
+  });
+}

@@ -1,0 +1,1207 @@
+import { isTob, TobError } from '../tob/service.js';
+import type { DatabaseSync } from 'node:sqlite';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  statSync,
+  type Dirent,
+} from 'node:fs';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
+
+import {
+  OperationalDatabaseError,
+  attachOperationalModule,
+  type OperationalDatabaseOwner,
+} from '../database/owner.js';
+import { deriveAvatarAppearance } from './avatar-snapshot.js';
+import {
+  isPersonaBotAvatar,
+  isPersonaBotRecord,
+  isPersonaBotAsr,
+  isPersonaBotVoice,
+  isUsableAvatarAppearance,
+  type CreatePersonaBotInput,
+  type CreatePersonaBotResult,
+  type MarketplaceListingRef,
+  type PersonaBotPatch,
+  type PersonaBotRecord,
+  type PersonaBotAsr,
+  type PersonaBotVoice,
+  type RemovePersonaBotOptions,
+  type UpdatePersonaBotResult,
+} from './persona-bot.js';
+import { isBotBanner, seededBotBanner } from './bot-banner.js';
+import {
+  isBotPrimaryColor,
+  nextBotPrimaryColor,
+  retainedBotPrimaryColor,
+} from './primary-color.js';
+import {
+  readSharedBanner,
+  readSharedPresentation,
+  readSharedPrimaryColor,
+} from './shared-presentation.js';
+import { isValidSlug } from './slug.js';
+import { memoryOwnership, recordMemoryOwnership, transferMemoryOwnership } from './deletion.js';
+import {
+  memoryRepositoryMatchesCommit,
+  type HttpsFallback,
+  type MemoryCloneResult,
+} from '../memory/clone.js';
+import { restoreBotHistory, writeBotFiles } from './bot-zip.js';
+import type { ZipEntry } from './zip-archive.js';
+import {
+  DEFAULT_STANDING_LIMITS,
+  isStandingLimits,
+  migrateLegacySoul,
+  seedStandingFiles,
+  type StandingLimits,
+} from '../memory/soul.js';
+import type { TelemetryEventName } from '../telemetry/events.js';
+import type { TelemetryCapture } from '../telemetry/service.js';
+import {
+  isPersonaBotModelPlan,
+  type AssignmentModelOption,
+  type ModelPreset,
+  type ModelRoute,
+  type PersonaBotModelPlan,
+} from '../models/presets.js';
+import { parsePromptLimitValues, type PromptLimitValues } from '../prompts/prompt-limits.js';
+import { parsePromptPartOverrides, type PromptPartOverrides } from '../prompts/prompt-presets.js';
+
+export interface MemoryRepositoryInitialization {
+  ok: boolean;
+  code?: 'git-not-found';
+  message?: string;
+}
+
+export interface PersonaBotRegistryOptions {
+  rootDir: string;
+  defaultMemoryPath?: (slug: string, humanId: string) => string;
+  validateMemoryPath?: (slug: string, humanId: string, path: string) => void;
+  onCreated?: (record: PersonaBotRecord, database: DatabaseSync) => void;
+  creationTopics?: readonly string[];
+  database: OperationalDatabaseOwner;
+  onImport?: (event: { phase: 'complete' | 'failed'; count?: number; durationMs: number }) => void;
+  now?: () => Date;
+  onDisplayNameChanged?: () => void;
+  onAvatarChanged?: () => void;
+  onAppearanceImported?: (record: PersonaBotRecord) => void;
+
+  initializeMemory?: (memoryDir: string) => MemoryRepositoryInitialization;
+  initializeMemoryAsync?: (memoryDir: string) => Promise<MemoryRepositoryInitialization>;
+  syncDescriptorAsync?: (memoryDir: string, record: PersonaBotRecord) => Promise<void>;
+  cloneMemory?: (destination: string, url: string) => Promise<MemoryCloneResult>;
+  onPurge?: (slug: string, removeFiles: () => void) => void;
+  capture?: TelemetryCapture;
+  syncDescriptor?: (
+    memoryDir: string,
+    record: PersonaBotRecord,
+    options: { onlyIfMissing: boolean },
+  ) => void;
+}
+
+export interface PersonaBotRegistry {
+  rootDir: string;
+  create(input: CreatePersonaBotInput): CreatePersonaBotResult;
+  createAsync(
+    input: CreatePersonaBotInput,
+    authorize?: () => void,
+  ): Promise<CreatePersonaBotResult>;
+  settled(humanId?: string): Promise<void>;
+  createFromGit(
+    input: Omit<CreatePersonaBotInput, 'memoryDir'> & { gitUrl: string; expectedCommit?: string },
+    authorize?: () => void,
+  ): Promise<CreatePersonaBotResult>;
+  createFromFiles(
+    input: Omit<CreatePersonaBotInput, 'memoryDir' | 'persona'> & {
+      files: readonly ZipEntry[];
+      history?: Buffer;
+    },
+    authorize?: () => void,
+  ): Promise<CreatePersonaBotResult>;
+  get(slug: string): PersonaBotRecord | undefined;
+  getHistorical(slug: string): PersonaBotRecord | undefined;
+  listHistorical(ownerHumanId?: string): PersonaBotRecord[];
+  list(ownerHumanId?: string): PersonaBotRecord[];
+  findByWorkspace(workspace: string): PersonaBotRecord | undefined;
+  remove(slug: string, options?: RemovePersonaBotOptions): boolean;
+  memoryDirFor(slug: string): string | undefined;
+  defaultMemoryDirFor(slug: string): string;
+  setMemoryDir(slug: string, memoryDir: string | undefined): UpdatePersonaBotResult;
+  update(slug: string, patch: PersonaBotPatch): UpdatePersonaBotResult;
+  setAppearance(
+    slug: string,
+    recipe: unknown,
+    origin?: 'custom' | 'default',
+  ): UpdatePersonaBotResult;
+  setBanner(slug: string, banner: unknown): UpdatePersonaBotResult;
+  setPrimaryColor(slug: string, choice: unknown): UpdatePersonaBotResult;
+  retainedRecordBody(slug: string): string | undefined;
+  setPaused(slug: string, paused: boolean): UpdatePersonaBotResult;
+  setComputerAccess(slug: string, enabled: boolean): UpdatePersonaBotResult;
+  setBrowserAccess(slug: string, enabled: boolean): UpdatePersonaBotResult;
+  setBrowserProfile(slug: string, profile: string): UpdatePersonaBotResult;
+  setApprovalTemplate(slug: string, template: string | undefined): UpdatePersonaBotResult;
+  setVoice(slug: string, voice: PersonaBotVoice | undefined): UpdatePersonaBotResult;
+  setAsr(slug: string, asr: PersonaBotAsr | undefined): UpdatePersonaBotResult;
+  setMarketplaceListing(slug: string, listing: MarketplaceListingRef): UpdatePersonaBotResult;
+  setPromptSettings(
+    slug: string,
+    settings: {
+      preset?: string | null;
+      overrides?: PromptPartOverrides;
+      limits?: PromptLimitValues;
+    },
+  ): UpdatePersonaBotResult;
+  setStandingLimits(slug: string, limits: StandingLimits): UpdatePersonaBotResult;
+  inheritModel(slug: string, expectedRevision: number): UpdatePersonaBotResult;
+  applyModelPreset(slug: string, preset: ModelPreset): UpdatePersonaBotResult;
+  migrateLegacyModel(
+    slug: string,
+    expectedModel: string,
+    route: ModelRoute,
+  ): UpdatePersonaBotResult;
+  customizeModelPlan(
+    slug: string,
+    orchestrator: PersonaBotModelPlan['orchestrator'],
+    expectedRevision: number,
+  ): UpdatePersonaBotResult;
+  setAssignmentModels(
+    slug: string,
+    assignmentDefault: ModelRoute,
+    assignmentModels: AssignmentModelOption[],
+    expectedRevision: number,
+  ): UpdatePersonaBotResult;
+  setModelPlan(
+    slug: string,
+    routes: {
+      orchestrator: ModelRoute;
+      assignmentDefault: ModelRoute;
+      assignmentModels: AssignmentModelOption[];
+    },
+    expectedRevision: number,
+  ): UpdatePersonaBotResult;
+}
+
+function isMissing(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException).code === 'ENOENT';
+}
+
+function normalizeWorkspacePath(path: string): string {
+  let normalized = path.trim();
+  while (normalized.length > 1 && normalized.endsWith('/')) {
+    normalized = normalized.slice(0, -1);
+  }
+  try {
+    return realpathSync.native(normalized);
+  } catch {
+    return normalized;
+  }
+}
+
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+export function createPersonaBotRegistry(options: PersonaBotRegistryOptions): PersonaBotRegistry {
+  mkdirSync(options.rootDir, { recursive: true });
+  const rootDir = realpathSync(options.rootDir);
+  const now = options.now ?? (() => new Date());
+  const botDir = (slug: string): string => join(rootDir, slug);
+  const botFile = (slug: string): string => join(botDir(slug), 'bot.json');
+  const defaultMemoryDir = (slug: string, humanId = 'local-human'): string =>
+    options.defaultMemoryPath?.(slug, humanId) ?? join(botDir(slug), 'memory');
+
+  const port = attachOperationalModule(options.database, 'bot-registry');
+  const capture = (event: TelemetryEventName): void => {
+    try {
+      options.capture?.(event);
+    } catch {
+      return;
+    }
+  };
+  const recordSnapshot = (record: PersonaBotRecord): PersonaBotRecord => {
+    const result: PersonaBotRecord = {
+      ownerHumanId: record.ownerHumanId ?? 'local-human',
+      slug: record.slug,
+      displayName: record.displayName,
+      workspaces: [...record.workspaces],
+      createdAt: record.createdAt,
+    };
+    for (const key of [
+      'ownerHumanId',
+      'displayNameCustomized',
+      'avatarCustomized',
+      'roles',
+      'tag',
+      'description',
+      'avatar',
+      'appearance',
+      'banner',
+      'avatarSeed',
+      'model',
+      'modelPlanRevision',
+      'preset',
+      'memoryDir',
+      'paused',
+      'computerAccess',
+      'browserAccess',
+      'browserProfile',
+      'approvalTemplate',
+      'promptPreset',
+    ] as const) {
+      if (record[key] !== undefined) Object.assign(result, { [key]: record[key] });
+    }
+    if (record.primaryColor !== undefined) result.primaryColor = { ...record.primaryColor };
+    if (record.voice !== undefined) result.voice = { ...record.voice };
+    if (record.asr !== undefined) result.asr = { ...record.asr };
+    if (record.promptOverrides !== undefined) {
+      const overrides = parsePromptPartOverrides(record.promptOverrides);
+      if (overrides !== undefined && Object.keys(overrides).length > 0)
+        result.promptOverrides = overrides;
+    }
+    if (record.promptLimits !== undefined) {
+      const limits = parsePromptLimitValues(record.promptLimits);
+      if (Object.keys(limits).length > 0) result.promptLimits = limits;
+    }
+    if (record.marketplaceListing !== undefined)
+      result.marketplaceListing = { ...record.marketplaceListing };
+    if (record.standingLimits !== undefined)
+      result.standingLimits = {
+        soul: record.standingLimits.soul,
+        coreMemory: record.standingLimits.coreMemory,
+      };
+    const route = (value: ModelRoute): ModelRoute => ({
+      provider: value.provider,
+      model: value.model,
+      ...(value.reasoningEffort === undefined ? {} : { reasoningEffort: value.reasoningEffort }),
+    });
+    const plan = record.modelPlan;
+    if (plan !== undefined)
+      result.modelPlan = {
+        revision: plan.revision,
+        sourcePresetId: plan.sourcePresetId,
+        sourcePresetName: plan.sourcePresetName,
+        appliedAt: plan.appliedAt,
+        orchestrator: route(plan.orchestrator),
+        ...(plan.assignmentDefault === undefined
+          ? {}
+          : { assignmentDefault: route(plan.assignmentDefault) }),
+        ...(plan.assignmentModels === undefined
+          ? {}
+          : {
+              assignmentModels: plan.assignmentModels.map((option) => ({
+                provider: option.provider,
+                model: option.model,
+                allowedEfforts: [...option.allowedEfforts],
+                defaultEffort: option.defaultEffort,
+                ...(option.note === undefined ? {} : { note: option.note }),
+              })),
+            }),
+      };
+    return result;
+  };
+  const decode = (text: string, slug: string): PersonaBotRecord => {
+    const parsed: unknown = JSON.parse(text);
+    if (
+      typeof parsed === 'object' &&
+      parsed !== null &&
+      'appearance' in parsed &&
+      !isUsableAvatarAppearance(parsed.appearance, (parsed as { avatar?: unknown }).avatar)
+    )
+      delete (parsed as { appearance?: unknown }).appearance;
+    if (
+      typeof parsed === 'object' &&
+      parsed !== null &&
+      'banner' in parsed &&
+      !isBotBanner(parsed.banner)
+    )
+      delete (parsed as { banner?: unknown }).banner;
+    if (
+      typeof parsed === 'object' &&
+      parsed !== null &&
+      'primaryColor' in parsed &&
+      !isBotPrimaryColor(parsed.primaryColor)
+    )
+      delete (parsed as { primaryColor?: unknown }).primaryColor;
+    if (
+      typeof parsed === 'object' &&
+      parsed !== null &&
+      'modelPlan' in parsed &&
+      !isPersonaBotModelPlan(parsed.modelPlan)
+    )
+      delete parsed.modelPlan;
+    if (
+      typeof parsed === 'object' &&
+      parsed !== null &&
+      'modelPlanRevision' in parsed &&
+      (typeof parsed.modelPlanRevision !== 'number' ||
+        !Number.isSafeInteger(parsed.modelPlanRevision) ||
+        parsed.modelPlanRevision < 0)
+    )
+      delete parsed.modelPlanRevision;
+    if (!isPersonaBotRecord(parsed, slug)) throw new Error('Invalid PersonaBot Registry record');
+    return recordSnapshot(parsed);
+  };
+  const read = (slug: string): PersonaBotRecord | undefined => {
+    if (!isValidSlug(slug)) return undefined;
+    return port.read((database) => {
+      const row = database.prepare('SELECT body FROM persona_bots WHERE slug = ?').get(slug);
+      return row === undefined ? undefined : decode(String(row['body']), slug);
+    });
+  };
+  const write = (record: PersonaBotRecord, creating = false, ownershipPath?: string): void => {
+    const slug = record.slug;
+    if (!isPersonaBotRecord(record, slug))
+      throw new Error(`Refusing to persist an invalid PersonaBot Registry record: ${slug}`);
+    port.transaction(
+      (database) => {
+        database
+          .prepare(`INSERT INTO persona_bots (slug, body, owner_human_id) VALUES (?, ?, ?)
+        ON CONFLICT (slug) DO UPDATE SET body = excluded.body, owner_human_id = excluded.owner_human_id`)
+          .run(
+            record.slug,
+            JSON.stringify(recordSnapshot(record)),
+            record.ownerHumanId ?? 'local-human',
+          );
+        if (ownershipPath) {
+          let proof: ReturnType<typeof memoryOwnership>;
+          try {
+            proof = memoryOwnership(ownershipPath);
+          } catch {
+            proof = { path: '', device: -1, inode: -1 };
+          }
+          database
+            .prepare('INSERT OR IGNORE INTO persona_bot_memory_ownership VALUES (?, ?)')
+            .run(record.slug, JSON.stringify(proof));
+        }
+        if (creating) options.onCreated?.(record, database);
+      },
+      ['bot-registry', ...(creating ? (options.creationTopics ?? []) : [])],
+    );
+  };
+  const deleted = (slug: string): boolean =>
+    port.read(
+      (database) =>
+        database.prepare('SELECT slug FROM persona_bot_deletions WHERE slug = ?').get(slug) !==
+        undefined,
+    );
+  const active = (slug: string): PersonaBotRecord | undefined =>
+    deleted(slug) ? undefined : read(slug);
+  const list = (ownerHumanId?: string): PersonaBotRecord[] =>
+    port.read((database) =>
+      database
+        .prepare(
+          ownerHumanId === undefined
+            ? 'SELECT slug, body FROM persona_bots'
+            : 'SELECT slug, body FROM persona_bots WHERE owner_human_id = ?',
+        )
+        .all(...(ownerHumanId === undefined ? [] : [ownerHumanId]))
+        .map((row) => decode(String(row['body']), String(row['slug'])))
+        .sort((left, right) => left.slug.localeCompare(right.slug)),
+    );
+  if (
+    options.database.mode === 'ready' &&
+    !port.read((database) =>
+      database.prepare('SELECT singleton FROM persona_bots_import WHERE singleton = 1').get(),
+    )
+  ) {
+    const startedAt = performance.now();
+    const report = (phase: 'complete' | 'failed', count?: number) => {
+      try {
+        options.onImport?.({
+          phase,
+          ...(count === undefined ? {} : { count }),
+          durationMs: performance.now() - startedAt,
+        });
+      } catch {}
+    };
+    try {
+      let entries: Dirent[];
+      try {
+        entries = readdirSync(rootDir, { withFileTypes: true });
+      } catch (error) {
+        if (!isMissing(error)) throw error;
+        entries = [];
+      }
+      const records: PersonaBotRecord[] = [];
+      for (const entry of entries.filter(
+        (entry) => entry.isDirectory() && isValidSlug(entry.name),
+      )) {
+        let text: string;
+        try {
+          text = readFileSync(botFile(entry.name), 'utf8');
+        } catch (error) {
+          if (isMissing(error)) continue;
+          throw error;
+        }
+        records.push(decode(text, entry.name));
+      }
+      port.transaction(
+        (database) => {
+          if (database.prepare('SELECT slug FROM persona_bots LIMIT 1').get())
+            throw new Error('PersonaBot Registry target is populated without an import marker');
+          const insert = database.prepare('INSERT INTO persona_bots (slug, body) VALUES (?, ?)');
+          for (const record of records) insert.run(record.slug, JSON.stringify(record));
+          database
+            .prepare('INSERT INTO persona_bots_import (singleton, imported_at) VALUES (1, ?)')
+            .run(now().toISOString());
+        },
+        ['bot-registry'],
+      );
+      report('complete', records.length);
+    } catch {
+      report('failed');
+      throw new Error(
+        'PersonaBot Registry import failed; repair retained legacy records before retry',
+      );
+    }
+  }
+
+  const memoryDirOf = (record: PersonaBotRecord): string =>
+    record.memoryDir ?? defaultMemoryDir(record.slug, record.ownerHumanId ?? 'local-human');
+
+  if (options.database.mode === 'ready') {
+    for (const record of list()) {
+      if (record.memoryDir === undefined && !deleted(record.slug))
+        recordMemoryOwnership(port, record.slug, memoryDirOf(record));
+    }
+  }
+
+  const applyOptionalText = (
+    record: PersonaBotRecord,
+    key: 'tag' | 'description' | 'avatar' | 'model' | 'preset',
+    value: string | undefined,
+  ): boolean => {
+    if (value === undefined) return true;
+    const trimmed = value.trim();
+    if (trimmed.length === 0) {
+      delete record[key];
+      return true;
+    }
+    if (key === 'avatar' && !isPersonaBotAvatar(trimmed)) return false;
+    record[key] = trimmed;
+    return true;
+  };
+
+  const normalizeRoles = (roles: readonly string[] | undefined): string[] => {
+    if (roles === undefined) return [];
+    return [...new Set(roles.map((role) => role.trim()).filter((role) => role.length > 0))];
+  };
+
+  const syncDescriptor = (record: PersonaBotRecord, onlyIfMissing = false): void => {
+    try {
+      options.syncDescriptor?.(memoryDirOf(record), record, { onlyIfMissing });
+    } catch {}
+  };
+
+  type Preparation =
+    | { kind: 'initialize'; memoryDir: string }
+    | { kind: 'descriptor'; memoryDir: string; record: PersonaBotRecord };
+  const creating = new Map<string, { humanId: string; settled: Promise<void> }>();
+  function* createSteps(
+    input: CreatePersonaBotInput,
+    sync: boolean,
+  ): Generator<Preparation, CreatePersonaBotResult, MemoryRepositoryInitialization> {
+    if (!isValidSlug(input.slug)) return { ok: false, reason: 'invalid-slug' };
+    if (read(input.slug) !== undefined) return { ok: false, reason: 'duplicate' };
+
+    const explicitMemoryDir = input.memoryDir?.trim();
+    if (
+      explicitMemoryDir !== undefined &&
+      explicitMemoryDir.length > 0 &&
+      !isAbsolute(explicitMemoryDir)
+    ) {
+      return { ok: false, reason: 'invalid-memory-dir' };
+    }
+    const memoryLocation = input.memoryLocation?.trim();
+    let memoryDir =
+      explicitMemoryDir ||
+      options.defaultMemoryPath?.(input.slug, input.ownerHumanId ?? 'local-human');
+    if (memoryLocation !== undefined && memoryLocation.length > 0) {
+      if (explicitMemoryDir || !isAbsolute(memoryLocation)) {
+        return { ok: false, reason: 'invalid-memory-dir' };
+      }
+      const parent = resolve(memoryLocation);
+      if (!isDirectory(parent)) return { ok: false, reason: 'invalid-memory-dir' };
+      memoryDir = join(parent, input.slug);
+      if (existsSync(memoryDir)) return { ok: false, reason: 'invalid-memory-dir' };
+    }
+    const chosenLocation = memoryLocation !== undefined && memoryLocation.length > 0;
+    const managedDefault = !explicitMemoryDir && !chosenLocation;
+
+    const displayName = input.displayName.trim();
+    const roles = normalizeRoles(input.roles);
+    const description = input.description?.trim();
+    const avatar = input.avatar?.trim();
+    if (avatar !== undefined && avatar.length > 0 && !isPersonaBotAvatar(avatar)) {
+      return { ok: false, reason: 'invalid-input' };
+    }
+    const model = input.model?.trim();
+    const preset = input.preset?.trim();
+    const record: PersonaBotRecord = {
+      approvalTemplate: '@global',
+      ownerHumanId: input.ownerHumanId ?? 'local-human',
+      slug: input.slug,
+      displayName: displayName.length > 0 ? displayName : input.slug,
+      workspaces: input.workspaces ?? [],
+      createdAt: now().toISOString(),
+      ...(roles.length > 0 ? { roles } : {}),
+      ...(description ? { description } : {}),
+      ...(avatar ? { avatar } : {}),
+      banner: seededBotBanner(displayName.length > 0 ? displayName : input.slug),
+      avatarSeed: 2,
+      ...(model ? { model } : {}),
+      ...(preset ? { preset } : {}),
+      ...(memoryDir ? { memoryDir } : {}),
+    };
+    const targetMemoryDir = memoryDirOf(record);
+    try {
+      options.validateMemoryPath?.(
+        record.slug,
+        record.ownerHumanId ?? 'local-human',
+        targetMemoryDir,
+      );
+    } catch {
+      return { ok: false, reason: 'invalid-memory-dir' };
+    }
+    const newMemoryDirectory = !existsSync(targetMemoryDir);
+    const newBotDirectory = !existsSync(botDir(record.slug));
+    try {
+      mkdirSync(targetMemoryDir, { recursive: !chosenLocation });
+    } catch (cause) {
+      return {
+        ok: false,
+        reason: 'memory-unavailable',
+        detail: cause instanceof Error ? cause.message : String(cause),
+      };
+    }
+    const seeded = seedStandingFiles(targetMemoryDir, {
+      ...(input.persona === undefined ? {} : { soul: input.persona }),
+      ...(input.coreMemory === undefined ? {} : { coreMemory: input.coreMemory }),
+      coreMemoryTemplate: sync,
+    });
+    let initialized: MemoryRepositoryInitialization;
+    try {
+      initialized = yield { kind: 'initialize', memoryDir: targetMemoryDir };
+      if (initialized.ok && sync) yield { kind: 'descriptor', memoryDir: targetMemoryDir, record };
+    } catch (error) {
+      if (newMemoryDirectory) rmSync(targetMemoryDir, { recursive: true, force: true });
+      else for (const file of seeded) rmSync(join(targetMemoryDir, file), { force: true });
+      throw error;
+    }
+    if (!initialized.ok) {
+      for (const file of seeded) rmSync(join(targetMemoryDir, file), { force: true });
+      if (newBotDirectory && !memoryDir) {
+        rmSync(botDir(record.slug), { recursive: true, force: true });
+      }
+      if (chosenLocation) rmSync(targetMemoryDir, { recursive: true, force: true });
+      return {
+        ok: false,
+        reason: initialized.code === 'git-not-found' ? 'git-not-found' : 'memory-unavailable',
+        ...(initialized.message === undefined ? {} : { detail: initialized.message }),
+      };
+    }
+    try {
+      write(record, true, newMemoryDirectory || managedDefault ? targetMemoryDir : undefined);
+    } catch (error) {
+      if (
+        newMemoryDirectory &&
+        !(error instanceof OperationalDatabaseError && error.code === 'post-commit-interrupted')
+      )
+        rmSync(targetMemoryDir, { recursive: true, force: true });
+      throw error;
+    }
+    return { ok: true, record };
+  }
+  const create = (input: CreatePersonaBotInput, sync: boolean): CreatePersonaBotResult => {
+    if (creating.has(input.slug)) return { ok: false, reason: 'duplicate' };
+    const steps = createSteps(input, sync);
+    let step = steps.next();
+    while (!step.done) {
+      const work = step.value;
+      const result =
+        work.kind === 'initialize'
+          ? (options.initializeMemory?.(work.memoryDir) ?? { ok: true })
+          : (syncDescriptor(work.record), { ok: true });
+      step = steps.next(result);
+    }
+    return step.value;
+  };
+
+  const createFromStaging = async (
+    input: Omit<CreatePersonaBotInput, 'memoryDir'>,
+    prefix: string,
+    populate: (
+      staging: string,
+    ) => Promise<Extract<CreatePersonaBotResult, { ok: false }>['reason'] | undefined>,
+    authorize?: () => void,
+  ): Promise<CreatePersonaBotResult> => {
+    if (!isValidSlug(input.slug)) return { ok: false, reason: 'invalid-slug' };
+    if (read(input.slug) !== undefined || existsSync(botDir(input.slug))) {
+      return { ok: false, reason: 'duplicate' };
+    }
+
+    let staging: string | undefined;
+    let ownsBotDir = false;
+    let importedMemory: string | undefined;
+    let created = false;
+    let authorizationError: unknown;
+    const checkAuthority = () => {
+      try {
+        authorize?.();
+      } catch (error) {
+        authorizationError = error;
+        throw error;
+      }
+    };
+    try {
+      checkAuthority();
+      mkdirSync(rootDir, { recursive: true });
+      staging = mkdtempSync(join(rootDir, prefix));
+      const failure = await populate(staging);
+      if (failure !== undefined) return { ok: false, reason: failure };
+      checkAuthority();
+      if (read(input.slug) !== undefined || existsSync(botDir(input.slug)))
+        return { ok: false, reason: 'duplicate' };
+
+      mkdirSync(botDir(input.slug));
+      ownsBotDir = true;
+      mkdirSync(dirname(defaultMemoryDir(input.slug, input.ownerHumanId ?? 'local-human')), {
+        recursive: true,
+      });
+      const target = defaultMemoryDir(input.slug, input.ownerHumanId ?? 'local-human');
+      if (existsSync(target)) return { ok: false, reason: 'invalid-memory-dir' };
+      renameSync(staging, target);
+      importedMemory = target;
+      staging = undefined;
+      try {
+        migrateLegacySoul(defaultMemoryDir(input.slug, input.ownerHumanId ?? 'local-human'));
+      } catch {}
+      const result = create(input, false);
+      created = result.ok;
+      if (!result.ok) return result;
+      recordMemoryOwnership(port, result.record.slug, memoryDirOf(result.record));
+      capture('bot_library:bot_create');
+      const shared = readSharedPresentation(
+        defaultMemoryDir(input.slug, input.ownerHumanId ?? 'local-human'),
+      );
+      const banner = readSharedBanner(
+        defaultMemoryDir(input.slug, input.ownerHumanId ?? 'local-human'),
+      );
+      const primaryColor = readSharedPrimaryColor(
+        defaultMemoryDir(input.slug, input.ownerHumanId ?? 'local-human'),
+      );
+      const presentation =
+        shared === undefined && banner === undefined && primaryColor === undefined
+          ? undefined
+          : {
+              ...shared,
+              ...(banner === undefined ? {} : { banner }),
+              ...(primaryColor === undefined ? {} : { primaryColor }),
+            };
+      if (presentation === undefined) {
+        syncDescriptor(result.record, true);
+        return result;
+      }
+      const presented = { ...result.record, ...presentation };
+      try {
+        write(presented);
+      } catch {
+        syncDescriptor(result.record, true);
+        return result;
+      }
+      if (presented.appearance !== undefined)
+        try {
+          options.onAppearanceImported?.(presented);
+        } catch {}
+      syncDescriptor(presented, true);
+      return { ok: true, record: presented };
+    } catch {
+      if (authorizationError !== undefined) throw authorizationError;
+      return { ok: false, reason: 'memory-unavailable' };
+    } finally {
+      if (staging !== undefined) rmSync(staging, { recursive: true, force: true });
+      if (ownsBotDir && !created && options.database.mode === 'ready') {
+        try {
+          if (read(input.slug) === undefined) {
+            rmSync(botDir(input.slug), { recursive: true, force: true });
+            if (importedMemory) rmSync(importedMemory, { recursive: true, force: true });
+          }
+        } catch {}
+      }
+    }
+  };
+
+  return {
+    rootDir,
+    create(input) {
+      const result = create(input, true);
+      if (result.ok) capture('bot_library:bot_create');
+      return result;
+    },
+    async createAsync(input, authorize) {
+      authorize?.();
+      if (creating.has(input.slug)) return { ok: false, reason: 'duplicate' };
+      let finish = (): void => {};
+      const settled = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      creating.set(input.slug, { humanId: input.ownerHumanId ?? 'local-human', settled });
+      try {
+        const steps = createSteps(input, true);
+        let step = steps.next();
+        try {
+          while (!step.done) {
+            const work = step.value;
+            let result: MemoryRepositoryInitialization = { ok: true };
+            if (work.kind === 'initialize')
+              result = options.initializeMemoryAsync
+                ? await options.initializeMemoryAsync(work.memoryDir)
+                : (options.initializeMemory?.(work.memoryDir) ?? result);
+            else {
+              try {
+                if (options.syncDescriptorAsync)
+                  await options.syncDescriptorAsync(work.memoryDir, work.record);
+                else syncDescriptor(work.record);
+              } catch {}
+            }
+            authorize?.();
+            step = steps.next(result);
+          }
+        } catch (error) {
+          steps.throw(error);
+          throw error;
+        }
+        if (step.value.ok) capture('bot_library:bot_create');
+        return step.value;
+      } finally {
+        creating.delete(input.slug);
+        finish();
+      }
+    },
+    async settled(humanId) {
+      await Promise.all(
+        [...creating.values()]
+          .filter((work) => humanId === undefined || work.humanId === humanId)
+          .map((work) => work.settled),
+      );
+    },
+    async createFromGit(input, authorize) {
+      const { gitUrl, expectedCommit, ...recordInput } = input;
+      let httpsFallback: HttpsFallback | undefined;
+      const result = await createFromStaging(
+        recordInput,
+        '.git-import-',
+        async (staging) => {
+          if (options.cloneMemory === undefined) return 'memory-unavailable';
+          const cloned = await options.cloneMemory(staging, gitUrl);
+          if (!cloned.ok) return cloned.code;
+          httpsFallback = cloned.httpsFallback;
+          if (
+            expectedCommit !== undefined &&
+            !(await memoryRepositoryMatchesCommit(staging, expectedCommit))
+          )
+            return 'git-source-changed';
+          return undefined;
+        },
+        authorize,
+      );
+      return result.ok && httpsFallback !== undefined ? { ...result, httpsFallback } : result;
+    },
+    async createFromFiles(input, authorize) {
+      const { files, history, ...recordInput } = input;
+      return createFromStaging(
+        recordInput,
+        '.zip-import-',
+        (staging) => {
+          try {
+            writeBotFiles(staging, files);
+            if (history !== undefined) restoreBotHistory(staging, history);
+            return Promise.resolve(undefined);
+          } catch {
+            return Promise.resolve('invalid-zip' as const);
+          }
+        },
+        authorize,
+      );
+    },
+    get: active,
+    getHistorical: read,
+    listHistorical: list,
+    list: (ownerHumanId) => list(ownerHumanId).filter((record) => !deleted(record.slug)),
+    findByWorkspace(workspace) {
+      const target = normalizeWorkspacePath(workspace);
+      if (target.length === 0) return undefined;
+      return list()
+        .filter((record) => !deleted(record.slug))
+        .find((record) =>
+          record.workspaces.some((candidate) => normalizeWorkspacePath(candidate) === target),
+        );
+    },
+    remove(slug) {
+      if (!isValidSlug(slug) || read(slug) === undefined) return false;
+      throw new Error('Use confirmed PersonaBot deletion; direct Registry removal is unavailable');
+    },
+    memoryDirFor(slug) {
+      const record = read(slug);
+      if (record === undefined) return undefined;
+      return memoryDirOf(record);
+    },
+    defaultMemoryDirFor(slug) {
+      return defaultMemoryDir(slug, read(slug)?.ownerHumanId ?? 'local-human');
+    },
+    setMemoryDir(slug, memoryDir) {
+      const record = active(slug);
+      if (record === undefined) return { ok: false, reason: 'not-found' };
+      const updated = { ...record };
+      options.validateMemoryPath?.(
+        slug,
+        record.ownerHumanId ?? 'local-human',
+        memoryDir ?? defaultMemoryDir(slug, record.ownerHumanId ?? 'local-human'),
+      );
+      if (
+        memoryDir === undefined ||
+        memoryDir === defaultMemoryDir(slug, record.ownerHumanId ?? 'local-human')
+      )
+        delete updated.memoryDir;
+      else updated.memoryDir = memoryDir;
+      write(updated);
+      transferMemoryOwnership(port, slug, memoryDirOf(updated));
+      return { ok: true, record: updated };
+    },
+    update(slug, patch) {
+      const record = active(slug);
+      if (record === undefined) return { ok: false, reason: 'not-found' };
+      const previousName = record.displayName;
+      const previousAvatar = record.avatar;
+      const previousAppearance = record.appearance;
+      const previousProfile = JSON.stringify([
+        record.roles,
+        record.tag,
+        record.description,
+        record.avatar,
+      ]);
+      if (patch.displayName !== undefined) {
+        const displayName = patch.displayName.trim();
+        if (displayName.length === 0) return { ok: false, reason: 'invalid-input' };
+        record.displayName = displayName;
+        if (isTob(port, slug)) record.displayNameCustomized = true;
+      }
+      if (patch.roles !== undefined) {
+        if (!Array.isArray(patch.roles) || !patch.roles.every((role) => typeof role === 'string')) {
+          return { ok: false, reason: 'invalid-input' };
+        }
+        const roles = normalizeRoles(patch.roles);
+        if (roles.length === 0) delete record.roles;
+        else record.roles = roles;
+        delete record.tag;
+      }
+      applyOptionalText(record, 'description', patch.description);
+      if (!applyOptionalText(record, 'avatar', patch.avatar)) {
+        return { ok: false, reason: 'invalid-input' };
+      }
+      if (patch.avatar !== undefined) {
+        delete record.appearance;
+        if (isTob(port, slug)) {
+          if (record.avatar) record.avatarCustomized = true;
+          else delete record.avatarCustomized;
+        }
+      }
+      applyOptionalText(record, 'model', patch.model);
+      applyOptionalText(record, 'preset', patch.preset);
+      if (patch.workspaces !== undefined) {
+        if (
+          !Array.isArray(patch.workspaces) ||
+          !patch.workspaces.every((workspace) => typeof workspace === 'string')
+        ) {
+          return { ok: false, reason: 'invalid-input' };
+        }
+        record.workspaces = [...patch.workspaces];
+      }
+      write(record);
+      if (record.displayName !== previousName) options.onDisplayNameChanged?.();
+      if (record.avatar !== previousAvatar || record.appearance !== previousAppearance)
+        options.onAvatarChanged?.();
+      if (patch.avatar !== undefined && record.avatar !== previousAvatar)
+        capture('bot_profile:avatar_update');
+      if (
+        record.displayName !== previousName ||
+        JSON.stringify([record.roles, record.tag, record.description, record.avatar]) !==
+          previousProfile
+      )
+        syncDescriptor(record);
+      return { ok: true, record };
+    },
+    setAppearance(slug, recipe, origin = 'custom') {
+      const record = active(slug);
+      if (record === undefined) return { ok: false, reason: 'not-found' };
+      const derived = deriveAvatarAppearance(recipe);
+      if (derived === undefined) return { ok: false, reason: 'invalid-input' };
+      const updated = { ...record, ...derived };
+      if (isTob(port, slug) && origin === 'custom') updated.avatarCustomized = true;
+      write(updated);
+      if (record.appearance?.revision !== updated.appearance.revision) options.onAvatarChanged?.();
+      syncDescriptor(updated);
+      capture('bot_profile:avatar_update');
+      return { ok: true, record: updated };
+    },
+    setBanner(slug, banner) {
+      const record = active(slug);
+      if (record === undefined) return { ok: false, reason: 'not-found' };
+      if (!isBotBanner(banner)) return { ok: false, reason: 'invalid-input' };
+      const updated = { ...record, banner };
+      write(updated);
+      syncDescriptor(updated);
+      capture('bot_profile:banner_update');
+      return { ok: true, record: updated };
+    },
+    setPrimaryColor(slug, choice) {
+      const record = active(slug);
+      if (record === undefined) return { ok: false, reason: 'not-found' };
+      const next = nextBotPrimaryColor(record.primaryColor, choice);
+      if (next === false) return { ok: false, reason: 'invalid-input' };
+      const { primaryColor: _previous, ...rest } = record;
+      const updated = next === undefined ? rest : { ...rest, primaryColor: next };
+      write(updated);
+      syncDescriptor(updated);
+      return { ok: true, record: updated };
+    },
+    retainedRecordBody(slug) {
+      const record = active(slug);
+      if (record === undefined) return undefined;
+      return JSON.stringify(
+        recordSnapshot({ ...record, primaryColor: retainedBotPrimaryColor(record) }),
+      );
+    },
+    setPaused(slug, paused) {
+      if (paused && isTob(port, slug)) throw new TobError('protected-bot');
+      const record = active(slug);
+      if (record === undefined) return { ok: false, reason: 'not-found' };
+      const archiving = paused && record.paused !== true;
+      if (paused) record.paused = true;
+      else delete record.paused;
+      write(record);
+      if (archiving) capture('bot_library:bot_archive');
+      return { ok: true, record };
+    },
+    setComputerAccess(slug, enabled) {
+      const record = active(slug);
+      if (record === undefined) return { ok: false, reason: 'not-found' };
+      if (enabled) record.computerAccess = true;
+      else delete record.computerAccess;
+      write(record);
+      return { ok: true, record };
+    },
+    setBrowserAccess(slug, enabled) {
+      const record = active(slug);
+      if (record === undefined) return { ok: false, reason: 'not-found' };
+      if (enabled) record.browserAccess = true;
+      else delete record.browserAccess;
+      write(record);
+      return { ok: true, record };
+    },
+    setBrowserProfile(slug, profile) {
+      const record = active(slug);
+      if (record === undefined) return { ok: false, reason: 'not-found' };
+      const trimmed = profile.trim();
+      if (trimmed === '') delete record.browserProfile;
+      else record.browserProfile = trimmed;
+      write(record);
+      return { ok: true, record };
+    },
+    setApprovalTemplate(slug, template) {
+      const record = active(slug);
+      if (record === undefined) return { ok: false, reason: 'not-found' };
+      if (template === undefined) delete record.approvalTemplate;
+      else record.approvalTemplate = template;
+      write(record);
+      return { ok: true, record };
+    },
+    setVoice(slug, voice) {
+      const record = active(slug);
+      if (record === undefined) return { ok: false, reason: 'not-found' };
+      if (voice !== undefined && !isPersonaBotVoice(voice))
+        return { ok: false, reason: 'invalid-input' };
+      if (voice === undefined) delete record.voice;
+      else
+        record.voice = {
+          providerId: voice.providerId,
+          ...(voice.voiceId === undefined ? {} : { voiceId: voice.voiceId.trim() }),
+        };
+      write(record);
+      return { ok: true, record };
+    },
+    setAsr(slug, asr) {
+      const record = active(slug);
+      if (record === undefined) return { ok: false, reason: 'not-found' };
+      if (asr !== undefined && !isPersonaBotAsr(asr)) return { ok: false, reason: 'invalid-input' };
+      if (asr === undefined) delete record.asr;
+      else
+        record.asr = {
+          providerId: asr.providerId,
+          ...(asr.language === undefined ? {} : { language: asr.language }),
+        };
+      write(record);
+      return { ok: true, record };
+    },
+    setMarketplaceListing(slug, listing) {
+      const record = active(slug);
+      if (record === undefined) return { ok: false, reason: 'not-found' };
+      record.marketplaceListing = { id: listing.id, pushedAt: listing.pushedAt };
+      write(record);
+      return { ok: true, record };
+    },
+    setPromptSettings(slug, settings) {
+      const record = active(slug);
+      if (record === undefined) return { ok: false, reason: 'not-found' };
+      if (settings.preset === null) delete record.promptPreset;
+      else if (settings.preset !== undefined) record.promptPreset = settings.preset;
+      if (settings.overrides !== undefined) {
+        if (Object.keys(settings.overrides).length === 0) delete record.promptOverrides;
+        else record.promptOverrides = settings.overrides;
+      }
+      if (settings.limits !== undefined) {
+        if (Object.keys(settings.limits).length === 0) delete record.promptLimits;
+        else record.promptLimits = settings.limits;
+      }
+      write(record);
+      return { ok: true, record };
+    },
+    setStandingLimits(slug, limits) {
+      const record = active(slug);
+      if (record === undefined) return { ok: false, reason: 'not-found' };
+      if (!isStandingLimits(limits)) return { ok: false, reason: 'invalid-input' };
+      if (
+        limits.soul === DEFAULT_STANDING_LIMITS.soul &&
+        limits.coreMemory === DEFAULT_STANDING_LIMITS.coreMemory
+      )
+        delete record.standingLimits;
+      else record.standingLimits = { soul: limits.soul, coreMemory: limits.coreMemory };
+      write(record);
+      return { ok: true, record };
+    },
+    inheritModel(slug, expectedRevision) {
+      const record = active(slug);
+      if (record === undefined) return { ok: false, reason: 'not-found' };
+      const revision = record.modelPlan?.revision ?? record.modelPlanRevision ?? 0;
+      if (revision !== expectedRevision) return { ok: false, reason: 'invalid-input' };
+      if (record.modelPlan === undefined && record.model === undefined) return { ok: true, record };
+      record.modelPlanRevision = revision + 1;
+      delete record.modelPlan;
+      delete record.model;
+      write(record);
+      return { ok: true, record };
+    },
+    applyModelPreset(slug, preset) {
+      const record = active(slug);
+      if (record === undefined) return { ok: false, reason: 'not-found' };
+      const plan: PersonaBotModelPlan = {
+        revision: (record.modelPlan?.revision ?? record.modelPlanRevision ?? 0) + 1,
+        sourcePresetId: preset.id,
+        sourcePresetName: preset.name,
+        orchestrator: { ...preset.orchestrator },
+        assignmentDefault: { ...preset.assignmentDefault },
+        ...(preset.assignmentModels === undefined
+          ? {}
+          : {
+              assignmentModels: preset.assignmentModels.map((option) => ({
+                ...option,
+                allowedEfforts: [...option.allowedEfforts],
+              })),
+            }),
+        appliedAt: now().toISOString(),
+      };
+      record.modelPlan = plan;
+      delete record.model;
+      write(record);
+      return { ok: true, record };
+    },
+    migrateLegacyModel(slug, expectedModel, route) {
+      const record = active(slug);
+      if (record === undefined) return { ok: false, reason: 'not-found' };
+      if (record.modelPlan !== undefined) return { ok: true, record };
+      if (record.model !== expectedModel) return { ok: false, reason: 'invalid-input' };
+      record.modelPlan = {
+        revision: 1,
+        sourcePresetId: '',
+        sourcePresetName: '',
+        orchestrator: { ...route },
+        assignmentDefault: { ...route },
+        appliedAt: now().toISOString(),
+      };
+      delete record.model;
+      write(record);
+      return { ok: true, record };
+    },
+    customizeModelPlan(slug, orchestrator, expectedRevision) {
+      const record = active(slug);
+      if (record === undefined) return { ok: false, reason: 'not-found' };
+      if (record.model !== undefined) return { ok: false, reason: 'invalid-input' };
+      const revision = record.modelPlan?.revision ?? record.modelPlanRevision ?? 0;
+      if (revision !== expectedRevision) return { ok: false, reason: 'invalid-input' };
+      record.modelPlan = {
+        ...record.modelPlan,
+        revision: revision + 1,
+        sourcePresetId: '',
+        sourcePresetName: '',
+        orchestrator: { ...orchestrator },
+        appliedAt: now().toISOString(),
+      };
+      write(record);
+      return { ok: true, record };
+    },
+    setAssignmentModels(slug, assignmentDefault, assignmentModels, expectedRevision) {
+      const record = active(slug);
+      if (record === undefined) return { ok: false, reason: 'not-found' };
+      if (record.modelPlan === undefined || record.modelPlan.revision !== expectedRevision)
+        return { ok: false, reason: 'invalid-input' };
+      record.modelPlan = {
+        ...record.modelPlan,
+        revision: record.modelPlan.revision + 1,
+        sourcePresetId: '',
+        sourcePresetName: '',
+        assignmentDefault: { ...assignmentDefault },
+        assignmentModels: assignmentModels.map((option) => ({
+          ...option,
+          allowedEfforts: [...option.allowedEfforts],
+        })),
+        appliedAt: now().toISOString(),
+      };
+      write(record);
+      return { ok: true, record };
+    },
+    setModelPlan(slug, routes, expectedRevision) {
+      const record = active(slug);
+      if (record === undefined) return { ok: false, reason: 'not-found' };
+      const revision = record.modelPlan?.revision ?? record.modelPlanRevision ?? 0;
+      if (revision !== expectedRevision) return { ok: false, reason: 'invalid-input' };
+      record.modelPlan = {
+        revision: revision + 1,
+        sourcePresetId: '',
+        sourcePresetName: '',
+        orchestrator: { ...routes.orchestrator },
+        assignmentDefault: { ...routes.assignmentDefault },
+        assignmentModels: routes.assignmentModels.map((option) => ({
+          ...option,
+          allowedEfforts: [...option.allowedEfforts],
+        })),
+        appliedAt: now().toISOString(),
+      };
+      delete record.model;
+      write(record);
+      return { ok: true, record };
+    },
+  };
+}

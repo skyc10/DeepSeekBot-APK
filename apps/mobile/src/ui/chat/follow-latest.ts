@@ -1,0 +1,437 @@
+import { useCallback, useLayoutEffect, useRef, useState, type RefObject } from 'react';
+import type {
+  FlatList,
+  LayoutChangeEvent,
+  NativeScrollEvent,
+  NativeSyntheticEvent,
+} from 'react-native';
+
+import type { ConversationMessage } from '../../host/conversation';
+
+export const LATEST_SLOP = 40;
+export const SETTLE_FRAMES = 45;
+export const STABLE_FRAMES = 6;
+export const CHECK_BUDGET = SETTLE_FRAMES * 4;
+export const NATIVE_GLIDE_MS = 450;
+const KEYBOARD_SETTLE_MS = 1000;
+export const MOMENTUM_WAIT_MS = 120;
+
+export type ListMetrics = { content: number; layout: number; offset: number; inset?: number };
+
+export function atLatest(distance: number): boolean {
+  return distance <= LATEST_SLOP;
+}
+
+export function shouldFly({
+  atLatest,
+  reducedMotion,
+}: {
+  atLatest: boolean;
+  reducedMotion: boolean;
+}): boolean {
+  return atLatest && !reducedMotion;
+}
+
+export function distanceFromLatest(metrics: ListMetrics, inverted = false): number {
+  if (inverted) return metrics.offset;
+  return metrics.content + (metrics.inset ?? 0) - metrics.layout - metrics.offset;
+}
+
+export function latestOffset(
+  metrics: Omit<ListMetrics, 'offset'>,
+  start: number,
+  inverted = false,
+): number {
+  if (inverted) return 0;
+  return Math.max(0 - start, metrics.content + (metrics.inset ?? 0) - metrics.layout);
+}
+
+export function unseenSince(
+  messages: readonly ConversationMessage[],
+  anchor: string | undefined,
+): number {
+  const start =
+    anchor === undefined ? 0 : messages.findLastIndex((message) => message.id === anchor) + 1;
+  if (anchor !== undefined && start === 0) return 0;
+  let count = 0;
+  for (let index = start; index < messages.length; index += 1)
+    if (messages[index]!.author !== 'human') count += 1;
+  return count;
+}
+
+type ScrollEvent = NativeSyntheticEvent<NativeScrollEvent>;
+
+export function useFollowLatest<Row>(
+  list: RefObject<Pick<FlatList<Row>, 'scrollToOffset'> | null>,
+  messages: readonly ConversationMessage[],
+  onFollowingChange?: (following: boolean) => void,
+  start = 0,
+  empty = false,
+  animateScroll = false,
+  minIndexForVisible = 0,
+  inverted = false,
+  nativeFollow = false,
+) {
+  const [following, setFollowing] = useState(true);
+  const [away, setAway] = useState(false);
+  const [anchor, setAnchor] = useState<string | undefined>();
+  const [ready, setReady] = useState(false);
+  const [canRetry, setCanRetry] = useState(false);
+  const [browsed, setBrowsed] = useState(false);
+  if (!ready && empty) setReady(true);
+  const followingNow = useRef(true);
+  const dragging = useRef(false);
+  const keyboardMoving = useRef(false);
+  const momentumFromDrag = useRef(false);
+  const latestId = useRef<string | undefined>(undefined);
+  latestId.current = messages.at(-1)?.id;
+  const hasRows = useRef(false);
+  hasRows.current = messages.length > 0;
+  const startInset = useRef(start);
+  startInset.current = start;
+  const metrics = useRef<ListMetrics>({ content: 0, layout: 0, offset: 0 });
+  const reportedContent = useRef(0);
+  const frame = useRef<number | undefined>(undefined);
+  const confirmation = useRef<number | undefined>(undefined);
+  const sizes = useRef(0);
+  const hasContent = useRef(false);
+  const hasLayout = useRef(false);
+  const settled = useRef(false);
+  const attempts = useRef(0);
+  const checks = useRef(0);
+  const keyboardTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const momentumTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const catchUpTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useLayoutEffect(() => {
+    if (!followingNow.current) onFollowingChange?.(false);
+  }, [onFollowingChange]);
+  useLayoutEffect(
+    () => () => {
+      if (frame.current !== undefined) cancelAnimationFrame(frame.current);
+      frame.current = undefined;
+      if (confirmation.current !== undefined) cancelAnimationFrame(confirmation.current);
+      confirmation.current = undefined;
+      clearTimeout(keyboardTimer.current);
+      clearTimeout(momentumTimer.current);
+      clearTimeout(catchUpTimer.current);
+    },
+    [],
+  );
+
+  const measureEvent = useCallback(
+    (event: ScrollEvent): number => {
+      const native = event.nativeEvent;
+      metrics.current = {
+        ...metrics.current,
+        content: hasContent.current
+          ? metrics.current.content
+          : (native.contentSize?.height ?? metrics.current.content),
+        layout: hasLayout.current
+          ? metrics.current.layout
+          : (native.layoutMeasurement?.height ?? metrics.current.layout),
+        offset: native.contentOffset.y,
+      };
+      return distanceFromLatest(metrics.current, inverted);
+    },
+    [inverted],
+  );
+
+  const scrollToLatest = useCallback(
+    (animated: boolean) => {
+      if (keyboardMoving.current) return;
+      const offset = latestOffset(metrics.current, startInset.current, inverted);
+      list.current?.scrollToOffset({ offset, animated: animated && animateScroll });
+    },
+    [list, animateScroll, inverted],
+  );
+
+  const hold = useCallback(() => {
+    momentumFromDrag.current = false;
+    clearTimeout(momentumTimer.current);
+    momentumTimer.current = undefined;
+    if (!followingNow.current) return;
+    followingNow.current = false;
+    settled.current = true;
+    setReady(true);
+    setCanRetry(false);
+    onFollowingChange?.(false);
+    setAway(true);
+    setAnchor(latestId.current);
+    setFollowing(false);
+  }, [onFollowingChange]);
+
+  const reveal = useCallback(
+    (delta: number) => {
+      hold();
+      const offset = Math.max(-startInset.current, metrics.current.offset + delta);
+      metrics.current = { ...metrics.current, offset };
+      list.current?.scrollToOffset({ offset, animated: false });
+    },
+    [hold, list],
+  );
+
+  const follow = useCallback(() => {
+    if (!followingNow.current) onFollowingChange?.(true);
+    followingNow.current = true;
+    setFollowing(true);
+    setAway(false);
+  }, [onFollowingChange]);
+
+  const confirm = useCallback(
+    (start: number) => {
+      if (confirmation.current !== undefined) cancelAnimationFrame(confirmation.current);
+      let version = start;
+      const check = (stable: number) => {
+        confirmation.current = requestAnimationFrame(() => {
+          confirmation.current = undefined;
+          if (settled.current || !hasRows.current) return;
+          checks.current += 1;
+          const measured =
+            version === sizes.current && version !== 0 && metrics.current.content > 0;
+          version = sizes.current;
+          if (!measured) {
+            if (checks.current >= CHECK_BUDGET) setCanRetry(true);
+            else check(0);
+            return;
+          }
+          attempts.current += 1;
+          const target = latestOffset(metrics.current, startInset.current, inverted);
+          const fits =
+            metrics.current.content + (metrics.current.inset ?? 0) + startInset.current <=
+              metrics.current.layout + 1 &&
+            metrics.current.offset >= target &&
+            metrics.current.offset <= 0;
+          const positioned =
+            metrics.current.layout > 0 && (fits || Math.abs(metrics.current.offset - target) <= 1);
+          if (positioned && (inverted || stable + 1 >= STABLE_FRAMES)) {
+            settled.current = true;
+            setCanRetry(false);
+            setReady(true);
+          } else if (attempts.current >= SETTLE_FRAMES || checks.current >= CHECK_BUDGET) {
+            setCanRetry(true);
+          } else check(positioned ? stable + 1 : 0);
+        });
+      };
+      check(0);
+    },
+    [inverted],
+  );
+
+  const pin = useCallback(
+    (animated = false) => {
+      if (keyboardMoving.current || frame.current !== undefined) return;
+      if (!followingNow.current && settled.current) return;
+      frame.current = requestAnimationFrame(() => {
+        frame.current = undefined;
+        if (followingNow.current && metrics.current.layout > 0) scrollToLatest(animated);
+        if (!settled.current) confirm(sizes.current);
+      });
+    },
+    [scrollToLatest, confirm],
+  );
+
+  const rowsPresent = messages.length > 0;
+  useLayoutEffect(() => {
+    if (!rowsPresent || settled.current) return;
+    checks.current = 0;
+    pin();
+  }, [rowsPresent, pin]);
+
+  const catchUp = useCallback(() => {
+    clearTimeout(catchUpTimer.current);
+    catchUpTimer.current = setTimeout(() => {
+      catchUpTimer.current = undefined;
+      if (!followingNow.current || dragging.current || keyboardMoving.current) return;
+      if (distanceFromLatest(metrics.current, inverted) > 1) scrollToLatest(true);
+    }, NATIVE_GLIDE_MS);
+  }, [inverted, scrollToLatest]);
+
+  const onKeyboardStart = useCallback(() => {
+    keyboardMoving.current = true;
+    if (frame.current !== undefined) cancelAnimationFrame(frame.current);
+    if (confirmation.current !== undefined) cancelAnimationFrame(confirmation.current);
+    frame.current = undefined;
+    confirmation.current = undefined;
+    clearTimeout(keyboardTimer.current);
+    keyboardTimer.current = setTimeout(() => {
+      keyboardTimer.current = undefined;
+      if (!keyboardMoving.current) return;
+      keyboardMoving.current = false;
+      pin();
+    }, KEYBOARD_SETTLE_MS);
+  }, [pin]);
+
+  const onKeyboardEnd = useCallback(() => {
+    clearTimeout(keyboardTimer.current);
+    keyboardTimer.current = undefined;
+    keyboardMoving.current = false;
+    pin();
+  }, [pin]);
+
+  const onKeyboardInsetChange = useCallback((insets: { bottom: number }) => {
+    metrics.current = { ...metrics.current, inset: insets.bottom };
+  }, []);
+
+  const settle = useCallback(
+    (distance: number) => {
+      if (!atLatest(distance)) return;
+      if (distance > 0) scrollToLatest(true);
+      follow();
+    },
+    [scrollToLatest, follow],
+  );
+
+  const onScroll = useCallback(
+    (event: ScrollEvent) => {
+      measureEvent(event);
+      if (
+        !settled.current &&
+        Math.abs(
+          metrics.current.offset - latestOffset(metrics.current, startInset.current, inverted),
+        ) <= 1
+      ) {
+        attempts.current = 0;
+        confirm(sizes.current);
+      }
+    },
+    [measureEvent, confirm, inverted],
+  );
+
+  const onScrollBeginDrag = useCallback(() => {
+    dragging.current = true;
+    setBrowsed(true);
+    hold();
+  }, [hold]);
+
+  const onScrollEndDrag = useCallback(
+    (event: ScrollEvent) => {
+      dragging.current = false;
+      const distance = measureEvent(event);
+      momentumFromDrag.current = (event.nativeEvent.velocity?.y ?? 0) !== 0;
+      clearTimeout(momentumTimer.current);
+      momentumTimer.current = undefined;
+      if (!momentumFromDrag.current) {
+        settle(distance);
+        return;
+      }
+      momentumTimer.current = setTimeout(() => {
+        momentumTimer.current = undefined;
+        if (dragging.current || !momentumFromDrag.current) return;
+        momentumFromDrag.current = false;
+        settle(distanceFromLatest(metrics.current, inverted));
+      }, MOMENTUM_WAIT_MS);
+    },
+    [measureEvent, settle, inverted],
+  );
+
+  const onMomentumScrollBegin = useCallback(() => {
+    clearTimeout(momentumTimer.current);
+    momentumTimer.current = undefined;
+  }, []);
+
+  const onMomentumScrollEnd = useCallback(
+    (event: ScrollEvent) => {
+      const distance = measureEvent(event);
+      if (dragging.current || !momentumFromDrag.current) return;
+      momentumFromDrag.current = false;
+      settle(distance);
+    },
+    [measureEvent, settle],
+  );
+
+  const onContentSizeChange = useCallback(
+    (_width: number, height: number) => {
+      hasContent.current = true;
+      const previous = reportedContent.current;
+      reportedContent.current = height;
+      if (animateScroll && previous === height && settled.current) return;
+      if (metrics.current.content !== height) {
+        metrics.current = { ...metrics.current, content: height };
+        sizes.current += 1;
+        attempts.current = 0;
+        if (checks.current < CHECK_BUDGET) setCanRetry(false);
+      }
+      if (nativeFollow && settled.current) {
+        if (height !== previous) catchUp();
+        return;
+      }
+      pin(animateScroll && settled.current && height > previous);
+    },
+    [pin, animateScroll, nativeFollow, catchUp],
+  );
+
+  const onLayout = useCallback(
+    (event: LayoutChangeEvent) => {
+      hasLayout.current = true;
+      const height = event.nativeEvent.layout.height;
+      if (metrics.current.layout !== height) {
+        metrics.current = { ...metrics.current, layout: height };
+        sizes.current += 1;
+        attempts.current = 0;
+        if (checks.current < CHECK_BUDGET) setCanRetry(false);
+      }
+      pin();
+    },
+    [pin],
+  );
+
+  const jumpToLatest = useCallback(() => {
+    follow();
+    settled.current = true;
+    setCanRetry(false);
+    setReady(true);
+    scrollToLatest(true);
+  }, [scrollToLatest, follow]);
+
+  const send = useCallback(
+    (jump = false): boolean => {
+      if (!followingNow.current) {
+        if (jump) jumpToLatest();
+        return false;
+      }
+      if (!settled.current) {
+        jumpToLatest();
+        return false;
+      }
+      return shouldFly({ atLatest: true, reducedMotion: !animateScroll });
+    },
+    [jumpToLatest, animateScroll],
+  );
+
+  const retry = useCallback(() => {
+    attempts.current = 0;
+    checks.current = 0;
+    setCanRetry(false);
+    pin();
+  }, [pin]);
+
+  return {
+    keyboard: {
+      onStart: onKeyboardStart,
+      onEnd: onKeyboardEnd,
+      onInsetChange: onKeyboardInsetChange,
+    },
+    away,
+    ready,
+    canRetry,
+    retry,
+    browsed,
+    unseen: following ? 0 : unseenSince(messages, anchor),
+    hold,
+    reveal,
+    jumpToLatest,
+    send,
+    listProps: {
+      onScroll,
+      onScrollToTop: hold,
+      onScrollBeginDrag,
+      onScrollEndDrag,
+      onMomentumScrollBegin,
+      onMomentumScrollEnd,
+      onContentSizeChange,
+      onLayout,
+      maintainVisibleContentPosition:
+        nativeFollow && !inverted && ready && following ? undefined : { minIndexForVisible },
+    },
+  };
+}

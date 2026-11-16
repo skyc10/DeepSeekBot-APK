@@ -1,0 +1,1353 @@
+import { humanContext, OWNER_HUMAN_CONTEXT } from '../src/humans/context.js';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+
+import { Context } from '@deepseek-ai/cordis';
+import { credentialRef } from '@deepseek-ai/dsh-credentials';
+import LocalCredentialProvider from '@deepseek-ai/dsh-credentials-local';
+import { remoteMethods } from '@deepseek-ai/dsh-typert-protocol';
+import { scopeTarget } from '@deepseek-ai/dsh-scope';
+import { SessionId } from '@deepseek-ai/dsh-session';
+import { SubagentRunId } from '@deepseek-ai/dsh-subagent';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import {
+  apply,
+  createCore,
+  inject,
+  mountOperationalDatabase,
+  name,
+  type BotHarnessCore,
+} from '../src/index.js';
+import { attachOperationalModule } from '../src/database/owner.js';
+import { BOT_HARNESS_SCHEMA_PLAN } from '../src/database/schema-plan.js';
+import { createSessionOwnership } from '../src/sessions/ownership.js';
+import { createTempRoot, remember } from './helpers.js';
+import { createFakeRosterDomain } from './roster-fixture.js';
+import { ChannelToolApproval } from '../src/workspaces/tool-approval.js';
+import { DeviceCallApprovals } from '../src/workspaces/device-approval.js';
+import type { Agent } from '@deepseek-ai/dsh-agent';
+import type { ToolExecution } from '@deepseek-ai/dsh-tools';
+import type { ApprovalService } from '@deepseek-ai/dsh-user-approval';
+
+interface Stubs {
+  tools: { register: ReturnType<typeof vi.fn>; guard: ReturnType<typeof vi.fn> };
+  systemPrompt: { section: ReturnType<typeof vi.fn> };
+  sessions: { list: ReturnType<typeof vi.fn>; get: ReturnType<typeof vi.fn> };
+  agents: {
+    create: ReturnType<typeof vi.fn>;
+    get: ReturnType<typeof vi.fn>;
+    resume: ReturnType<typeof vi.fn>;
+    list: ReturnType<typeof vi.fn>;
+  };
+  skills: { register: ReturnType<typeof vi.fn> };
+}
+
+const contexts: Context[] = [];
+
+beforeEach(() => {
+  vi.stubEnv('DSH_HOME', createTempRoot('botharness-plugin-home-'));
+});
+
+afterEach(async () => {
+  while (contexts.length > 0) {
+    const ctx = contexts.pop();
+    if (ctx !== undefined) await ctx.fiber.dispose();
+  }
+  vi.unstubAllEnvs();
+});
+
+function createStubContext(): { ctx: Context; stubs: Stubs } {
+  const ctx = new Context().extend({ invocation: { peer: { principal: { kind: 'owner' } } } });
+  contexts.push(ctx);
+  const stubs: Stubs = {
+    tools: { register: vi.fn(() => () => undefined), guard: vi.fn(() => () => undefined) },
+    systemPrompt: { section: vi.fn(() => () => undefined) },
+    sessions: { list: vi.fn(() => []), get: vi.fn() },
+    agents: { create: vi.fn(), get: vi.fn(), resume: vi.fn(), list: vi.fn(() => []) },
+    skills: { register: vi.fn(() => () => undefined) },
+  };
+  ctx.provide('tools', stubs.tools);
+  ctx.provide('systemPrompt', stubs.systemPrompt);
+  ctx.provide('sessions', stubs.sessions);
+  ctx.provide('agents', stubs.agents as never);
+  ctx.provide('skills', stubs.skills);
+  return { ctx, stubs };
+}
+
+function logsSkill(stubs: { skills: { register: { mock: { calls: unknown[][] } } } }) {
+  return stubs.skills.register.mock.calls.filter(
+    ([skill]) => (skill as { name?: string }).name === 'reading-operational-logs',
+  );
+}
+
+describe('plugin entry', () => {
+  it('refreshes the selected Skill view when a live Orchestrator Agent attaches and detaches', async () => {
+    const { ctx, stubs } = createStubContext();
+    const list = vi.fn(async (options?: { cwd?: string; scope?: object }) =>
+      options?.cwd === undefined
+        ? []
+        : [
+            {
+              name: options.scope === agent ? 'live' : 'preset',
+              description: 'Project Skill',
+              source: 'project-agents',
+              path: join(options.cwd, '.agents/skills/qa/SKILL.md'),
+              invocation: { userInvocable: true },
+            },
+          ],
+    );
+    const skills = Object.assign(stubs.skills, {
+      list,
+      async get() {
+        return undefined;
+      },
+      registerProvider: vi.fn(() => () => {}),
+    });
+    ctx.provide('agentPresets', {
+      serviceFor: () => skills,
+      async acquireScope() {
+        return { key: {}, async [Symbol.asyncDispose]() {} };
+      },
+    } as never);
+    const agent = {
+      ctx,
+      session: { id: 'ada-live', header: {}, snapshotEvents: () => [] },
+    };
+    apply(ctx, { enabled: true });
+    const core = ctx.get('botharness');
+    const bridge = ctx.get('botharnessBridge');
+    if (core === undefined || bridge === undefined) throw new Error('Core unavailable');
+    core.registry.create({ slug: 'ada', displayName: 'Ada' });
+    const dm = core.channels.getOrCreateDm(OWNER_HUMAN_CONTEXT, 'ada', 'Ada')!;
+    vi.spyOn(core.runtime, 'currentOrchestratorSessionId').mockReturnValue('ada-live');
+    const changed = vi.spyOn(core.live, 'publishSkillCatalogChanged');
+    await vi.waitFor(async () => {
+      expect((await bridge.channelSkillCatalog(dm.id)).skills).toMatchObject([{ name: 'preset' }]);
+    });
+    stubs.agents.list.mockReturnValue([agent]);
+    changed.mockClear();
+    await ctx.serial('agent/created', { agent, source: 'startup' } as never);
+    expect(changed).toHaveBeenCalledExactlyOnceWith({ botSlugs: ['ada'], channelIds: [dm.id] });
+    expect((await bridge.channelSkillCatalog(dm.id)).skills).toMatchObject([{ name: 'live' }]);
+    stubs.agents.list.mockReturnValue([]);
+    changed.mockClear();
+    ctx.emit('agent/disposed', { agent } as never);
+    expect(changed).toHaveBeenCalledExactlyOnceWith({ botSlugs: ['ada'], channelIds: [dm.id] });
+    expect((await bridge.channelSkillCatalog(dm.id)).skills).toMatchObject([{ name: 'preset' }]);
+  });
+
+  it('binds a native Subagent activation before a later parent turn can take its usage', () => {
+    const { ctx, stubs } = createStubContext();
+    apply(ctx, { enabled: true });
+    const core: BotHarnessCore | undefined = ctx.get('botharness');
+    if (!core?.usage) throw new Error('Usage unavailable');
+    expect(core.registry.create({ slug: 'ada', displayName: 'Ada' }).ok).toBe(true);
+    const db = attachOperationalModule(core.operationalDatabase, 'subagent-attribution-test');
+    const at = Date.now();
+    core.ownership.claim({
+      sessionId: 'parent',
+      botSlug: 'ada',
+      rootRole: 'orchestrator',
+      at: new Date(at).toISOString(),
+    });
+    core.ownership.claim({
+      sessionId: 'child',
+      botSlug: 'ada',
+      rootRole: 'assignment',
+      provenance: 'subagent',
+      parentSessionId: 'parent',
+      at: new Date(at).toISOString(),
+    });
+    const parentTurn = (human: string, turn: number) => {
+      db.transaction((connection) =>
+        connection
+          .prepare('INSERT OR REPLACE INTO usage_turn_humans VALUES (?, -1, ?, ?)')
+          .run('parent', human, at),
+      );
+      core.usage!.handleSessionEvent('parent', {
+        type: 'turn/start',
+        seq: turn,
+        time: at,
+        data: { turn },
+      });
+    };
+    parentTurn('alice', 1);
+    stubs.agents.get.mockReturnValue({ session: { header: { parentSession: 'parent' } } });
+    ctx.emit('subagent/start', {
+      id: SessionId('child'),
+      runId: SubagentRunId('activation'),
+      provider: 'spawn',
+      local: true,
+    });
+    parentTurn('bob', 2);
+    core.usage.handleSessionEvent('child', {
+      type: 'turn/start',
+      seq: 1,
+      time: at + 1,
+      data: { turn: 1 },
+    });
+    core.usage.handleSessionEvent('child', {
+      type: 'assistant/message',
+      seq: 2,
+      time: at + 2,
+      data: {
+        turn: 1,
+        usage: {
+          inputTokens: 10,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          totalTokens: 10,
+        },
+      },
+    });
+    core.usage.handleSessionEvent('child', {
+      type: 'turn/start',
+      seq: 3,
+      time: at + 3,
+      data: { turn: 2 },
+    });
+    core.usage.handleSessionEvent('child', {
+      type: 'assistant/message',
+      seq: 4,
+      time: at + 4,
+      data: {
+        turn: 2,
+        usage: {
+          inputTokens: 10,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          totalTokens: 10,
+        },
+      },
+    });
+    expect(core.usage.byMember('today', 'local-human', (slug) => slug).members).toMatchObject([
+      { humanId: 'alice', totals: { totalTokens: 20 } },
+    ]);
+  });
+
+  it('drains member cleanup before closing the operational database on actual Cordis disposal', async () => {
+    const { ctx } = createStubContext();
+    apply(ctx, { enabled: true });
+    const core: BotHarnessCore | undefined = ctx.get('botharness');
+    if (!core) throw new Error('Core unavailable');
+    const db = attachOperationalModule(core.operationalDatabase, 'shutdown-member-test');
+    db.transaction((connection) => {
+      connection
+        .prepare("INSERT INTO humans VALUES ('bob', 'Bob', 'deactivated', '2026-11-14')")
+        .run();
+      connection.prepare("INSERT INTO human_roles VALUES ('bob', 'member')").run();
+      connection
+        .prepare("INSERT INTO member_credentials VALUES ('bob', 'bob', '{}', '[]', 0)")
+        .run();
+    });
+    core.team.spaces.ensureAccount('bob');
+    expect(
+      core.registry.create({
+        slug: 'bob-private',
+        displayName: 'Private Bob name',
+        ownerHumanId: 'bob',
+      }).ok,
+    ).toBe(true);
+    let release!: () => void;
+    let entered!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const retry = core.deletions.retry.bind(core.deletions);
+    vi.spyOn(core.deletions, 'retry').mockImplementation(async (slug) => {
+      entered();
+      await pending;
+      return retry(slug);
+    });
+    const settled = vi.spyOn(core.contentPurge, 'memberSettled');
+    const close = vi.spyOn(core.operationalDatabase, 'close');
+    const preview = core.team.purgePreview(OWNER_HUMAN_CONTEXT, 'bob');
+    const purge = core.team.purgeConfirm(OWNER_HUMAN_CONTEXT, 'bob', preview.token, 'bob');
+    void purge.catch(() => {});
+    await started;
+    const shutdown = ctx.fiber.dispose();
+    try {
+      await vi.waitFor(() => expect(settled).toHaveBeenCalledTimes(2));
+      expect(close).not.toHaveBeenCalled();
+      expect(core.operationalDatabase.mode).toBe('ready');
+    } finally {
+      release();
+      await Promise.allSettled([purge, shutdown]);
+    }
+    await expect(purge).resolves.toBeNull();
+    expect(close).toHaveBeenCalledOnce();
+    const read = new DatabaseSync(join(process.env['DSH_HOME']!, 'botharness', 'botharness.db'), {
+      readOnly: true,
+    });
+    try {
+      const record = read
+        .prepare(
+          "SELECT json_extract(body, '$.displayName') AS name FROM persona_bots WHERE slug = 'bob-private'",
+        )
+        .get();
+      expect(record).toEqual({ name: '' });
+      expect(
+        read
+          .prepare(
+            "SELECT json_extract(body, '$.displayName') AS name FROM persona_bot_deletions WHERE slug = 'bob-private'",
+          )
+          .get(),
+      ).toEqual({ name: '' });
+    } finally {
+      read.close();
+    }
+  });
+
+  it('uses the canonical Team Owner for the Core live hub after transfer', async () => {
+    const core = createCore({ dshHome: createTempRoot('core-live-owner-') });
+    try {
+      await core.team.setOwnerPassword(OWNER_HUMAN_CONTEXT, 'owner-password-1');
+      await core.team.setMode(OWNER_HUMAN_CONTEXT, true);
+      const created = await core.team.createMember(OWNER_HUMAN_CONTEXT, 'bob', 'Bob');
+      const human = humanContext(created.member.humanId);
+      await core.team.changePassword(human, created.initialPassword, 'member-password-1');
+      core.registry.create({ slug: 'owner-bot', displayName: 'Owner Bot' });
+      const channel = core.channels.getOrCreateRemoteBotDm('owner-bot', {
+        hostId: 'remote-host',
+        botSlug: 'remote-bot',
+        displayName: 'Remote',
+      });
+      if (!channel) throw new Error('missing DM');
+      const request = () =>
+        new Request(`http://localhost/api/botharness/stream?channelId=${channel.id}`);
+      const before = core.live.open(OWNER_HUMAN_CONTEXT, request());
+      await before.body?.cancel();
+      expect(before.status).toBe(200);
+      await core.team.transferOwner(OWNER_HUMAN_CONTEXT, human.humanId, 'owner-password-1');
+      const after = core.live.open(OWNER_HUMAN_CONTEXT, request());
+      await after.body?.cancel();
+      expect(after.status).toBe(404);
+    } finally {
+      core.live.close();
+      core.operationalDatabase.close();
+    }
+  });
+
+  it.each([
+    ['browser', 'browser_open', 'browser_observe', 'botharnessBrowserTools'],
+    ['computer', 'computer_click', 'computer_type_text', 'botharnessComputerTools'],
+  ])(
+    'keeps %s standing rules tool-specific and revocable through the actual interceptor',
+    async (_device, toolName, siblingName, serviceName) => {
+      const { ctx } = createStubContext();
+      const calls = new DeviceCallApprovals();
+      let sessionAuthorized = false;
+      const markAuthorized = vi.fn(() => {
+        sessionAuthorized = true;
+        return true;
+      });
+      ctx.provide(serviceName, {
+        ownsTool: (name: string) => name === toolName || name === siblingName,
+        needsAuthorization: () => !sessionAuthorized,
+        authorizationScope: () => 'live-target',
+        approvalScope: () => 'durable-target',
+        markAuthorized,
+        authorizeCall: (token: symbol, authorized: () => boolean) =>
+          calls.authorize(token, authorized),
+      });
+      ctx.provide('approval', {
+        request: (request: Parameters<ApprovalService['request']>[0]) =>
+          ctx.waterfall('approval/request', request, async () => 'unavailable' as const),
+      } as never);
+      const tracked = vi.spyOn(ChannelToolApproval.prototype, 'track');
+      try {
+        apply(ctx, { enabled: true });
+        const core = ctx.get('botharness') as unknown as BotHarnessCore;
+        core.registry.create({ slug: 'ada', displayName: 'Ada' });
+        core.ownership.claim({
+          sessionId: 'device-session',
+          botSlug: 'ada',
+          rootRole: 'orchestrator',
+          at: new Date().toISOString(),
+        });
+        const agent = {
+          id: 'device-session',
+          session: { id: 'device-session', header: { cwd: core.registry.memoryDirFor('ada') } },
+        } as Agent;
+        const run = async (name: string, callId: string) => {
+          const execution = {
+            name,
+            callId,
+            agent,
+            arguments: {},
+            signal: new AbortController().signal,
+            token: Symbol(callId),
+          } as ToolExecution;
+          const carrier = scopeTarget(ctx.tools, agent);
+          const decision = await ctx.waterfall(
+            carrier,
+            'tools/pre-execute',
+            execution,
+            async () => ({
+              kind: 'allow' as const,
+            }),
+          );
+          if (decision.kind === 'allow') {
+            expect(calls.allowed(execution.token)).toBe(true);
+            ctx.emit(carrier, 'tools/result', execution, {
+              isError: false,
+              value: null,
+              content: [],
+            });
+            expect(calls.allowed(execution.token)).toBe(false);
+          }
+          return decision;
+        };
+        const first = run(toolName, 'first');
+        await vi.waitFor(() => expect(tracked).toHaveBeenCalled());
+        const owner = tracked.mock.contexts.at(-1);
+        if (!(owner instanceof ChannelToolApproval)) throw new Error('Missing approval owner');
+        await vi.waitFor(() => expect(owner.requests('ada')).toHaveLength(1));
+        await owner.decide(
+          OWNER_HUMAN_CONTEXT,
+          'ada',
+          owner.requests('ada')[0]!.messageId,
+          'allowed-always-tool',
+        );
+        expect(await first).toEqual({ kind: 'allow' });
+        expect(markAuthorized).not.toHaveBeenCalled();
+        expect(await run(toolName, 'repeat')).toEqual({ kind: 'allow' });
+        const sibling = run(siblingName, 'sibling');
+        await vi.waitFor(() => expect(owner?.requests('ada')).toHaveLength(1));
+        await owner.decide(
+          OWNER_HUMAN_CONTEXT,
+          'ada',
+          owner.requests('ada')[0]!.messageId,
+          'rejected',
+        );
+        expect(await sibling).toMatchObject({ kind: 'deny' });
+        const rule = core.toolRules.list('ada').find((rule) => rule.toolName === toolName)!;
+        core.toolRules.revoke('ada', rule.id);
+        const revoked = run(toolName, 'revoked');
+        await vi.waitFor(() => expect(owner?.requests('ada')).toHaveLength(1));
+        await owner.decide(
+          OWNER_HUMAN_CONTEXT,
+          'ada',
+          owner.requests('ada')[0]!.messageId,
+          'rejected',
+        );
+        expect(await revoked).toMatchObject({ kind: 'deny' });
+        expect(markAuthorized).not.toHaveBeenCalled();
+      } finally {
+        tracked.mockRestore();
+      }
+    },
+  );
+
+  it('waits for the native credential Provider before starting a restored runtime Consumer', async () => {
+    const { ctx } = createStubContext();
+    ctx.provide('agentDefaultModel', {} as never);
+    ctx.provide('llm', {} as never);
+    vi.stubEnv('BH_SYNTHETIC_RESTART_KEY', 'synthetic-test-only');
+    const checks: boolean[] = [];
+    const consumer = ctx.plugin({
+      name: 'restored-runtime-readiness-probe',
+      inject,
+      async apply(c: Context) {
+        const credentials = c.get('credentials');
+        checks.push(
+          credentials !== undefined &&
+            (await credentials.describe(credentialRef('BH_SYNTHETIC_RESTART_KEY'))).configured,
+        );
+      },
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(checks).toEqual([]);
+    const provider = ctx.plugin(LocalCredentialProvider, {
+      path: join(process.env['DSH_HOME']!, '.credentials.yaml'),
+      watch: false,
+    });
+    await provider.await();
+    await consumer.await();
+    expect(checks).toEqual([true]);
+  });
+
+  it('declares its identity', () => {
+    expect(name).toBe('botharness-core');
+    expect(inject).toEqual([
+      'tools',
+      'systemPrompt',
+      'sessions',
+      'agents',
+      'agentDefaultModel',
+      'llm',
+      'credentials',
+    ]);
+  });
+
+  it('registers nothing when disabled', () => {
+    const { ctx, stubs } = createStubContext();
+
+    apply(ctx, { enabled: false });
+
+    expect(ctx.get('botharness')).toBeUndefined();
+    expect(ctx.get('botharnessBridge')).toBeUndefined();
+    expect(stubs.tools.register).not.toHaveBeenCalled();
+    expect(stubs.systemPrompt.section).not.toHaveBeenCalled();
+    expect(stubs.skills.register).not.toHaveBeenCalled();
+  });
+
+  it('sends app:host_start and app:usage_report from the Host only while telemetry is on', async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () => new Response('{}', { status: 200 }));
+    vi.stubGlobal('fetch', fetchImpl);
+    try {
+      const telemetryCalls = () =>
+        fetchImpl.mock.calls.filter(([url]) => String(url) === 'https://t.botharness.ai/batch/');
+      const home = process.env['DSH_HOME']!;
+      for (const [config, env] of [
+        [{ enabled: true, telemetry: false }, {}],
+        [{ enabled: true }, { DO_NOT_TRACK: '1' }],
+        [{ enabled: true }, { DO_NOT_TRACK: '', BOTHARNESS_TELEMETRY: '0' }],
+      ] as const) {
+        vi.stubEnv('DO_NOT_TRACK', '');
+        for (const [key, value] of Object.entries(env)) vi.stubEnv(key, value);
+        const { ctx } = createStubContext();
+        const monitors = process.listenerCount('uncaughtExceptionMonitor');
+        apply(ctx, config);
+        expect(process.listenerCount('uncaughtExceptionMonitor')).toBe(monitors);
+        await ctx.fiber.dispose();
+        expect(telemetryCalls()).toEqual([]);
+        expect(existsSync(join(home, 'botharness', 'telemetry.json'))).toBe(false);
+      }
+
+      vi.stubEnv('DO_NOT_TRACK', '');
+      vi.stubEnv('BOTHARNESS_TELEMETRY', '');
+      const { ctx } = createStubContext();
+      const monitors = process.listenerCount('uncaughtExceptionMonitor');
+      apply(ctx, { enabled: true, telemetry: true });
+      expect(process.listenerCount('uncaughtExceptionMonitor')).toBe(monitors + 1);
+      await ctx.fiber.dispose();
+      expect(process.listenerCount('uncaughtExceptionMonitor')).toBe(monitors);
+      await vi.waitFor(() => {
+        expect(telemetryCalls()).toHaveLength(1);
+      });
+      const body = JSON.parse(String(telemetryCalls()[0]![1]?.body)) as {
+        batch: { event: string; distinct_id: string; properties: Record<string, unknown> }[];
+      };
+      const installId = (
+        JSON.parse(readFileSync(join(home, 'botharness', 'telemetry.json'), 'utf8')) as {
+          installId: string;
+        }
+      ).installId;
+      expect(body.batch.map((event) => event.event)).toEqual([
+        'app:host_start',
+        'app:usage_report',
+      ]);
+      expect(body.batch[0]!.distinct_id).toBe(installId);
+      expect(Object.keys(body.batch[0]!.properties).sort()).toEqual([
+        '$geoip_disable',
+        '$process_person_profile',
+        'app_version',
+        'arch',
+        'cpu_count_bucket',
+        'dsh_version',
+        'node_version',
+        'os',
+        'os_release_major',
+        'source',
+        'total_mem_gb_bucket',
+      ]);
+      expect(Object.keys(body.batch[1]!.properties).sort()).toEqual([
+        '$geoip_disable',
+        '$process_person_profile',
+        'app_version',
+        'arch',
+        'cpu_count_bucket',
+        'dsh_version',
+        'message_count',
+        'node_version',
+        'os',
+        'os_release_major',
+        'persona_bot_count',
+        'session_count',
+        'source',
+        'total_mem_gb_bucket',
+        'window_hours',
+      ]);
+      expect(JSON.stringify(body)).not.toContain(home);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('keeps a Human preference saved in Bot settings off across a Host restart', async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () => new Response('{}', { status: 200 }));
+    vi.stubGlobal('fetch', fetchImpl);
+    try {
+      vi.stubEnv('DO_NOT_TRACK', '');
+      vi.stubEnv('BOTHARNESS_TELEMETRY', '');
+      const dir = join(process.env['DSH_HOME']!, 'botharness');
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'telemetry.json'), JSON.stringify({ enabled: false }));
+      const { ctx } = createStubContext();
+      apply(ctx, { enabled: true });
+      const bridge = ctx.get('botharnessBridge') as unknown as {
+        telemetryStatus(): { enabled: boolean; preference: boolean };
+      };
+      expect(bridge.telemetryStatus()).toEqual({ enabled: false, preference: false });
+      await ctx.fiber.dispose();
+      expect(fetchImpl).not.toHaveBeenCalledWith(
+        'https://t.botharness.ai/batch/',
+        expect.anything(),
+      );
+    } finally {
+      vi.unstubAllEnvs();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('provides the core without model-visible memory tools', () => {
+    const { ctx, stubs } = createStubContext();
+
+    apply(ctx, { enabled: true });
+
+    expect(ctx.get('botharness')).toMatchObject({
+      rootDir: expect.stringContaining('botharness'),
+      operationalDatabase: expect.objectContaining({ mode: 'ready' }),
+      registry: expect.anything(),
+      states: expect.anything(),
+      memory: expect.anything(),
+      channels: expect.anything(),
+      roster: expect.anything(),
+      runtime: expect.anything(),
+    });
+    expect(stubs.tools.register).not.toHaveBeenCalled();
+  });
+
+  it('leaves the operational-logs skill unregistered until developer mode', async () => {
+    const { ctx, stubs } = createStubContext();
+
+    apply(ctx, { enabled: true });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(logsSkill(stubs)).toHaveLength(0);
+  });
+
+  it('always offers the local voice skill', async () => {
+    const { ctx, stubs } = createStubContext();
+    apply(ctx, { enabled: true });
+    await vi.waitFor(() =>
+      expect(
+        stubs.skills.register.mock.calls.map(([skill]) => (skill as { name: string }).name),
+      ).toContain('setting-up-local-voice'),
+    );
+  });
+
+  it('restores and updates developer mode from native settings without a Client', async () => {
+    const { ctx, stubs } = createStubContext();
+    const settingsEvents = ctx as unknown as {
+      emit(name: 'settings/document-updated', namespace: string, revision: number): void;
+    };
+    let enabled = true;
+    const dispose = vi.fn();
+    stubs.skills.register.mockReturnValue(dispose);
+    ctx.provide('settings', {
+      describe: () => [{ ns: 'botharness-client', revision: 1, value: { developerMode: enabled } }],
+    } as never);
+    apply(ctx, { enabled: true });
+    await vi.waitFor(() => expect(logsSkill(stubs)).toHaveLength(1));
+    enabled = false;
+    settingsEvents.emit('settings/document-updated', 'botharness-client', 2);
+    expect(dispose).toHaveBeenCalledOnce();
+    enabled = true;
+    settingsEvents.emit('settings/document-updated', 'unrelated', 3);
+    expect(logsSkill(stubs)).toHaveLength(1);
+    settingsEvents.emit('settings/document-updated', 'botharness-client', 4);
+    expect(logsSkill(stubs)).toHaveLength(2);
+  });
+
+  it('applies persisted developer mode when native Settings becomes available later', async () => {
+    const { ctx, stubs } = createStubContext();
+    apply(ctx, { enabled: true });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(logsSkill(stubs)).toHaveLength(0);
+    ctx.provide('settings', {
+      describe: () => [{ ns: 'botharness-client', revision: 0, value: { developerMode: true } }],
+    } as never);
+    await vi.waitFor(() => expect(logsSkill(stubs)).toHaveLength(1));
+  });
+
+  it('rebuilds the activity projection from owned Session logs and follows live events', () => {
+    const home = createTempRoot('botharness-plugin-activity-');
+    vi.stubEnv('DSH_HOME', home);
+    const seeded = mountOperationalDatabase({ dshHome: home, schemaPlan: BOT_HARNESS_SCHEMA_PLAN });
+    createSessionOwnership(attachOperationalModule(seeded, 'session-ownership')).claim({
+      sessionId: 'owned-1',
+      botSlug: 'ada',
+      rootRole: 'orchestrator',
+      cwdReference: '/srv/shared',
+      at: '2026-09-21T00:00:00.000Z',
+    });
+    createSessionOwnership(attachOperationalModule(seeded, 'session-ownership')).claim({
+      sessionId: 'stale-1',
+      botSlug: 'ada',
+      rootRole: 'assignment',
+      cwdReference: '/srv/shared',
+      at: '2026-09-21T00:00:00.000Z',
+    });
+    seeded.close();
+
+    const { ctx, stubs } = createStubContext();
+    const log = (type: string) => [{ type, time: 1, data: {} }];
+    stubs.agents.list.mockReturnValue([{ session: { id: 'owned-1' }, status: 'running' }]);
+    stubs.sessions.list.mockReturnValue([
+      {
+        id: 'owned-1',
+        header: { cwd: '/srv/shared', createdAt: 0 },
+        snapshotEvents: () => log('tool/call'),
+      },
+      {
+        id: 'stale-1',
+        header: { cwd: '/srv/shared', createdAt: 0 },
+        snapshotEvents: () => log('tool/call'),
+      },
+      {
+        id: 'unowned-1',
+        header: { cwd: '/srv/shared', createdAt: 0 },
+        snapshotEvents: () => log('tool/call'),
+      },
+    ]);
+
+    apply(ctx, { enabled: true });
+    const core = ctx.get('botharness') as BotHarnessCore | undefined;
+
+    expect(core?.states.snapshot('ada').sessions).toEqual({
+      'owned-1': 'working',
+      'stale-1': 'done',
+    });
+
+    ctx.emit('agent/status', {
+      agent: { session: { id: 'owned-1' } },
+      status: 'idle',
+    } as never);
+    expect(core?.states.snapshot('ada').sessions).toMatchObject({ 'owned-1': 'done' });
+    ctx.emit(
+      'session/event',
+      { id: 'owned-1' } as never,
+      { type: 'turn/start', time: 2, data: {} } as never,
+    );
+    expect(core?.states.snapshot('ada').sessions).toMatchObject({ 'owned-1': 'thinking' });
+
+    ctx.emit(
+      'session/event',
+      { id: 'owned-1' } as never,
+      { type: 'turn/end', time: 2, data: {} } as never,
+    );
+    expect(core?.states.snapshot('ada').sessions).toMatchObject({ 'owned-1': 'done' });
+
+    ctx.emit(
+      'session/event',
+      { id: 'unowned-1' } as never,
+      { type: 'tool/call', time: 3, data: {} } as never,
+    );
+    expect(core?.states.snapshot('ada').sessions).toMatchObject({ 'owned-1': 'done' });
+
+    ctx.emit('agent/disposed', { agent: { session: { id: 'owned-1' } } } as never);
+    expect(core?.states.snapshot('ada').sessions).toEqual({ 'stale-1': 'done' });
+  });
+
+  it('closes the operational database last with the plugin fiber', async () => {
+    const home = createTempRoot('botharness-plugin-lifecycle-');
+    vi.stubEnv('DSH_HOME', home);
+    const { ctx } = createStubContext();
+
+    apply(ctx, { enabled: true });
+
+    const core = ctx.get('botharness') as BotHarnessCore | undefined;
+    expect(core?.operationalDatabase.mode).toBe('ready');
+
+    await ctx.fiber.dispose();
+    expect(core?.operationalDatabase.mode).toBe('closed');
+
+    const nextHost = mountOperationalDatabase({
+      dshHome: home,
+      schemaPlan: BOT_HARNESS_SCHEMA_PLAN,
+    });
+    expect(nextHost.mode).toBe('ready');
+    nextHost.close();
+  });
+
+  it('keeps file-backed surfaces and diagnostics mounted in database recovery mode', async () => {
+    const home = createTempRoot('botharness-plugin-recovery-');
+    vi.stubEnv('DSH_HOME', home);
+    const firstHost = mountOperationalDatabase({ dshHome: home, instanceId: 'first-host' });
+    const { ctx, stubs } = createStubContext();
+
+    try {
+      apply(ctx, { enabled: true });
+
+      const core = ctx.get('botharness') as BotHarnessCore | undefined;
+      expect(core?.operationalDatabase.mode).toBe('recovery');
+      expect(core?.operationalDatabase.recovery?.code).toBe('lease-unavailable');
+      expect(core?.operationalDatabase.diagnostics().leaseHolder?.instanceId).toBe('first-host');
+      expect(core?.registry).toBeDefined();
+      expect(core?.memory).toBeDefined();
+      expect(core?.channels).toBeDefined();
+      expect(core?.cloudConnections).toBeDefined();
+      expect(() => core?.cloudConnections?.list()).toThrow(/recovery mode/);
+      expect(() =>
+        core?.ownership.claim({
+          sessionId: 'session-1',
+          botSlug: 'ada',
+          rootRole: 'orchestrator',
+          at: '2026-09-21T00:00:00.000Z',
+        }),
+      ).toThrow(/recovery mode/);
+      expect(stubs.tools.register).not.toHaveBeenCalled();
+      expect(stubs.systemPrompt.section).toHaveBeenCalledTimes(1);
+      expect(ctx.get('botharnessBridge')).toBeDefined();
+    } finally {
+      await ctx.fiber.dispose();
+      firstHost.close();
+    }
+  });
+
+  it('registers the persona prompt section', () => {
+    const { ctx, stubs } = createStubContext();
+
+    apply(ctx, { enabled: true });
+
+    expect(stubs.systemPrompt.section).toHaveBeenCalledTimes(1);
+    const sections = stubs.systemPrompt.section.mock.calls.map((call) => call[0]);
+    const persona = sections.find((section) => section?.name === 'botharness:persona');
+    expect(persona?.order).toBe(10400);
+
+    expect(persona?.text({})).toBe('');
+    expect(persona?.text({ agent: { session: { header: { cwd: '/no/such/workspace' } } } })).toBe(
+      '',
+    );
+  });
+
+  it('registers the client bridge as a typert service on the gateway namespace', () => {
+    const { ctx } = createStubContext();
+
+    apply(ctx, { enabled: true });
+
+    const bridge = ctx.get('botharnessBridge');
+    expect(bridge).toBeDefined();
+    expect(bridge?.typertRemote.namespace).toBe('botharness');
+    expect(
+      remoteMethods(bridge as object).map((marker) => marker.exportName ?? marker.method),
+    ).toEqual([
+      'botVisibility',
+      'botVisibilitySet',
+      'botSwitches',
+      'reachableBots',
+      'botProactiveOptOut',
+      'roleConflicts',
+      'speakerPolicy',
+      'privateObjects',
+      'privateContentOpen',
+      'privateContentPage',
+      'auditLog',
+      'auditVerify',
+      'spaces',
+      'spaceAudienceDirectory',
+      'spaceCreate',
+      'spaceUpdate',
+      'spaceDelete',
+      'teamMode',
+      'modelsAllowed',
+      'usageByMember',
+      'teamModeSet',
+      'teamOwnerPasswordSet',
+      'teamInsecureHttpSet',
+      'members',
+      'memberCreate',
+      'permissionCatalog',
+      'roles',
+      'roleCreate',
+      'roleUpdate',
+      'roleDelete',
+      'memberRolesSet',
+      'memberDevices',
+      'memberDeviceRevoke',
+      'ownerTransfer',
+      'memberPasswordChange',
+      'memberPasswordReset',
+      'channelRoleDirectory',
+      'browsableChannels',
+      'channelJoin',
+      'channelVisibilitySet',
+      'channelAdminsSet',
+      'channelPolicySet',
+      'channelHumanAdd',
+      'channelMemberCandidates',
+      'channelDescriptionSet',
+      'teamDirectory',
+      'humanDm',
+      'humanDmByUsername',
+      'memberDeactivate',
+      'memberReactivate',
+      'memberTransferPreview',
+      'memberTransfer',
+      'memberPurgePreview',
+      'memberPurgeConfirm',
+      'publicChannels',
+      'publicChannelJoin',
+      'channelPublicSet',
+      'privateInputStatus',
+      'privateInputSubmit',
+      'privateInputCancel',
+      'privateAccountStatus',
+      'privateInputReplace',
+      'privateAccountRevoke',
+      'privateAccounts',
+      'privateMcpServerRemove',
+      'privateMcpServerEnable',
+      'messagingDefaults',
+      'messagingDefaultsSet',
+      'channelBridges',
+      'channelBridge',
+      'channelIngests',
+      'channelIngest',
+      'messagingChannelTarget',
+      'messagingReceive',
+      'messagingGroupPolicy',
+      'messagingThreadPolicy',
+      'messagingSource',
+      'messagingIdentity',
+      'approvalRoute',
+      'approvalTest',
+      'approvalRetry',
+      'questionRetry',
+      'failureAlertsSet',
+      'failureAlertsTest',
+      'failureAlertsRetry',
+      'pairingReview',
+      'senderAccess',
+      'cloudConnections',
+      'cloudWork',
+      'messagingApps',
+      'messagingSnapshot',
+      'messagingTargets',
+      'messagingReachable',
+      'messagingPostConversation',
+      'messagingPostRequest',
+      'messagingPostLimit',
+      'messagingAuthorize',
+      'messagingRevoke',
+      'messagingConversation',
+      'messagingSend',
+      'tobHome',
+      'onboarding',
+      'acknowledgements',
+      'acknowledge',
+      'onboardingModel',
+      'telemetryEvent',
+      'modelPlanInherit',
+      'channelRetry',
+      'botNewSession',
+      'botCompact',
+      'botContext',
+      'botSystemPrompt',
+      'botTurnInput',
+      'channelBotStop',
+      'sessionStop',
+      'botStop',
+      'modelCatalog',
+      'modelPresets',
+      'modelPresetCreate',
+      'modelPresetUpdate',
+      'modelPresetApply',
+      'modelPlan',
+      'modelPlanCustomize',
+      'modelPlanAssignmentsSet',
+      'modelPlanSet',
+      'list',
+      'activitySnapshot',
+      'get',
+      'create',
+      'createLookup',
+      'zipUploadBegin',
+      'zipUploadChunk',
+      'zipUploadPreview',
+      'zipImportLookup',
+      'zipImport',
+      'botImportPreview',
+      'botImportLookup',
+      'createFromGit',
+      'update',
+      'dataResetPreview',
+      'dataResetConfirm',
+      'deletionPreview',
+      'deletionConfirm',
+      'deletionRetry',
+      'deletionMemoryFolder',
+      'pause',
+      'resume',
+      'channels',
+      'ping',
+      'humanIdentity',
+      'composerIdentity',
+      'composerValidate',
+      'humanNameSet',
+      'channelHumanNameSet',
+      'channelDm',
+      'channelGet',
+      'channelCreate',
+      'channelRename',
+      'channelGroupAvatarSet',
+      'channelGroupInvite',
+      'channelGroupInviteCancel',
+      'channelGroupMemberRemove',
+      'channelGroupJoinDecide',
+      'channelGroupSendReview',
+      'channelGroupWakeSet',
+      'channelGroupWakePolicies',
+      'channelGroupDelete',
+      'channelHistory',
+      'channelHistorySources',
+      'channelPurgePreview',
+      'channelPurgeConfirm',
+      'storageUsage',
+      'storageCleanupPreview',
+      'storageCleanupConfirm',
+      'storageMessagesCleanupPreview',
+      'storageMessagesCleanupConfirm',
+      'channelMessages',
+      'channelTimeline',
+      'channelReadPosition',
+      'channelMarkRead',
+      'channelMarkAllRead',
+      'channelReact',
+      'channelSearch',
+      'messageSearch',
+      'channelUnreadCounts',
+      'channelAllBotPreview',
+      'channelSkillCatalog',
+      'botSkills',
+      'skillShow',
+      'botSkillRemove',
+      'channelSend',
+      'channelSendStatus',
+      'channelGenuiView',
+      'channelGenuiViewSave',
+      'botAttention',
+      'botSourcePolicies',
+      'botSourcePolicySet',
+      'botSourcePolicyReset',
+      'activityOverview',
+      'channelActivityToday',
+      'humanAttention',
+      'humanAssignmentContext',
+      'humanAttentionStatus',
+      'humanAttentionIgnore',
+      'humanAttentionDismiss',
+      'humanAttentionRestore',
+      'humanAttentionDismissAll',
+      'humanAttentionSnooze',
+      'assignments',
+      'channelAssignments',
+      'assignment',
+      'assignmentTimeline',
+      'sessionSubagents',
+      'workspaceOptions',
+      'messageAttachmentTarget',
+      'channelMediaTarget',
+      'workspaceFileTarget',
+      'folderBrowse',
+      'grants',
+      'grantCreate',
+      'grantRevoke',
+      'grantWriteSet',
+      'grantRequestApprove',
+      'assignmentAccessGet',
+      'assignmentAccessSet',
+      'toolApprovalRules',
+      'toolApprovalRuleRevoke',
+      'toolApprovalHistory',
+      'toolApprovalStatus',
+      'toolApprovalDecide',
+      'toolAutoRejectionOverride',
+      'userQuestionStatus',
+      'userQuestionAnswer',
+      'sessions',
+      'botToolTrace',
+      'botTools',
+      'botToolRun',
+      'sessionArchiveSet',
+      'memoryMove',
+      'sessionOwner',
+      'botSessionIds',
+      'memoryFileTarget',
+      'memoryImage',
+      'memorySnapshot',
+      'memoryFile',
+      'memoryHistory',
+      'memoryDiff',
+      'memoryGitGraph',
+      'memoryGitCommitDiff',
+      'memoryWorkingChanges',
+      'memoryWorkingDiff',
+      'memoryRecoveryHistory',
+      'memoryRestore',
+      'memorySave',
+      'memoryRestoreCommit',
+      'memoryNameVersion',
+      'memoryRemoveVersionName',
+      'memoryVersions',
+      'memoryRepair',
+      'profileActivity',
+      'profileSessionUsage',
+      'overviewMemory',
+      'overviewUsage',
+      'profileUsage',
+      'groupProfileActivity',
+      'rosterGet',
+      'sectionCreate',
+      'sectionRename',
+      'sectionRemove',
+      'channelAssign',
+      'sectionReorder',
+      'topReorder',
+      'pinsSet',
+      'hiddenSet',
+      'channelMuteSet',
+      'rosterBatch',
+      'developerModeSet',
+      'computerAccessSet',
+      'browserAccessSet',
+      'browserProfileSet',
+      'approvalTemplates',
+      'promptParts',
+      'promptPresets',
+      'promptPresetCreate',
+      'promptPresetUpdate',
+      'promptPresetDelete',
+      'promptGlobalSet',
+      'botPrompt',
+      'botPromptSet',
+      'approvalTemplateCreate',
+      'approvalTemplateUpdate',
+      'approvalTemplateDelete',
+      'approvalTemplateGlobalSet',
+      'botApprovalTemplateSet',
+      'approvalReviewerModel',
+      'approvalReviewerModelSet',
+      'voiceProviders',
+      'voiceProviderAdd',
+      'voiceProviderRemove',
+      'voiceProviderTest',
+      'voiceSynthesize',
+      'botVoiceSet',
+      'voiceTranscribe',
+      'botAsrSet',
+      'voiceDefaultSet',
+      'voiceSpeechThresholdSet',
+      'voiceDictation',
+      'idleCompaction',
+      'idleCompactionSet',
+      'idleCompactionCacheLifetimeSet',
+      'compactionThresholdSet',
+      'standingLimitsSet',
+      'botAvatarSet',
+      'botAppearanceSet',
+      'botPrimaryColorSet',
+      'partLibraryList',
+      'partLibraryAdd',
+      'partLibraryExport',
+      'partLibraryImport',
+      'partLibraryImportImage',
+      'botBannerSet',
+      'marketplaceList',
+      'marketplaceSubmit',
+      'marketplaceTopics',
+      'marketplaceSections',
+      'marketplaceDigests',
+      'marketplaceDigest',
+      'marketplaceDetail',
+      'marketplaceFileView',
+      'marketplaceChallenge',
+      'marketplaceReport',
+      'marketplaceAccount',
+      'marketplaceAuthorSave',
+      'marketplaceAuthorAvatarSet',
+      'marketplaceUploadPlan',
+      'marketplaceUpload',
+      'marketplaceInstallReview',
+      'marketplaceMine',
+      'marketplaceDelete',
+      'shareDraftStart',
+      'shareDraftGet',
+      'shareDraftFile',
+      'shareDraftDecide',
+      'shareDraftFinish',
+      'shareDraftDiscard',
+      'shareDraftExport',
+      'marketplaceInstall',
+      'releaseInfo',
+      'releaseUpdate',
+      'releaseInstall',
+      'releaseRestart',
+      'pluginUpdates',
+      'pluginInstall',
+      'pluginRestart',
+      'updateRun',
+      'updateCancel',
+      'telemetryStatus',
+      'telemetrySet',
+      'gitStatus',
+      'gitInstall',
+      'scheduleList',
+      'takeoverList',
+      'takeoverStatus',
+      'takeoverRequest',
+      'takeoverComplete',
+      'takeoverCancel',
+      'scheduleCreate',
+      'scheduleUpdate',
+      'scheduleDelete',
+      'scheduleHistory',
+      'scheduleRunNow',
+      'schedulePreview',
+      'channelJournalPage',
+      'channelFilesPage',
+      'channelChanges',
+      'channelChangeCursor',
+      'channelListChanges',
+      'followRoster',
+      'followActivity',
+      'followChannel',
+      'followCompanion',
+    ]);
+  });
+
+  it('opens the roster domain when storageDomain is served', async () => {
+    const { ctx } = createStubContext();
+    const fake = createFakeRosterDomain();
+    ctx.provide('storageDomain', fake.facility as never);
+
+    apply(ctx, { enabled: true });
+
+    const core = ctx.get('botharness') as { roster: { available: boolean } } | undefined;
+    await vi.waitFor(() => {
+      expect(core?.roster.available).toBe(true);
+    });
+    const bridge = ctx.get('botharnessBridge');
+    expect(bridge?.rosterGet()).toEqual({
+      pins: [],
+      hidden: [],
+      muted: [],
+      sectionOrder: [],
+      sections: [],
+      topOrder: undefined,
+    });
+  });
+
+  it('keeps loading without storageDomain and reports the roster unavailable', async () => {
+    const { ctx } = createStubContext();
+
+    apply(ctx, { enabled: true });
+
+    const core = ctx.get('botharness') as { roster: { available: boolean } } | undefined;
+    expect(core?.roster.available).toBe(false);
+    const bridge = ctx.get('botharnessBridge');
+    expect(bridge).toBeDefined();
+    try {
+      bridge?.rosterGet();
+      expect.unreachable('rosterGet should throw while storage is unavailable');
+    } catch (error) {
+      expect(error).toMatchObject({
+        name: 'RemoteError',
+        code: 'storage-unavailable',
+        message: 'roster storage is unavailable',
+      });
+    }
+  });
+
+  it('resolves memory by Session ownership', async () => {
+    const home = createTempRoot('botharness-plugin-');
+    vi.stubEnv('DSH_HOME', home);
+    try {
+      const { ctx, stubs } = createStubContext();
+      apply(ctx, { enabled: true });
+
+      const core = ctx.get('botharness') as BotHarnessCore | undefined;
+      expect(core).toBeDefined();
+      const created = core?.registry.create({ slug: 'local-bot', displayName: 'Local' });
+      expect(created?.ok).toBe(true);
+      core?.ownership.claim({
+        sessionId: 'orchestrator-local',
+        botSlug: 'local-bot',
+        rootRole: 'orchestrator',
+        at: '2026-09-21T00:00:00.000Z',
+      });
+
+      const store = core?.memory.storeForSession('orchestrator-local');
+      expect(store).toBeDefined();
+      await remember(store!, {
+        path: 'confidences.md',
+        body: 'tea over coffee\n',
+        summary: 'Preference',
+      });
+
+      const sections = stubs.systemPrompt.section.mock.calls.map((call) => call[0]);
+      const persona = sections.find((section) => section?.name === 'botharness:persona');
+      const standing = persona?.text({ agent: { session: { id: 'orchestrator-local' } } });
+      expect(standing).toContain('## Core Memory (MEMORY.md)');
+      expect(standing).not.toContain('## Soul');
+      expect(core?.memory.storeForSession('unowned-session')).toBeUndefined();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('freezes the persona prompt section for the Session and gives an edit to new Sessions', async () => {
+    const home = createTempRoot('botharness-plugin-');
+    vi.stubEnv('DSH_HOME', home);
+    try {
+      const { ctx, stubs } = createStubContext();
+      apply(ctx, { enabled: true });
+
+      const core = ctx.get('botharness') as BotHarnessCore | undefined;
+      const created = core?.registry.create({ slug: 'local-bot', displayName: 'Local' });
+      expect(created?.ok).toBe(true);
+      core?.ownership.claim({
+        sessionId: 'orchestrator-local',
+        botSlug: 'local-bot',
+        rootRole: 'orchestrator',
+        at: '2026-09-21T00:00:00.000Z',
+      });
+      core?.ownership.claim({
+        sessionId: 'orchestrator-new',
+        botSlug: 'local-bot',
+        rootRole: 'orchestrator',
+        at: '2026-09-21T00:00:01.000Z',
+      });
+
+      const memoryDir = core?.registry.memoryDirFor('local-bot');
+      if (memoryDir === undefined) throw new Error('memory dir missing');
+      writeFileSync(join(memoryDir, 'SOUL.md'), '# Persona v1\n');
+
+      const sections = stubs.systemPrompt.section.mock.calls.map((call) => call[0]);
+      const persona = sections.find((section) => section?.name === 'botharness:persona');
+      const running = { agent: { session: { id: 'orchestrator-local' } } };
+      const frozen = persona?.text(running);
+      expect(frozen).toContain('## Soul (SOUL.md)');
+      expect(frozen).toContain('# Persona v1');
+
+      writeFileSync(join(memoryDir, 'SOUL.md'), '# Persona v2\n');
+      writeFileSync(join(memoryDir, 'MEMORY.md'), '- grew mid-Session\n');
+
+      expect(persona?.text(running)).toBe(frozen);
+      const fresh = persona?.text({ agent: { session: { id: 'orchestrator-new' } } });
+      expect(fresh).toContain('# Persona v2');
+      expect(fresh).toContain('- grew mid-Session');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+});

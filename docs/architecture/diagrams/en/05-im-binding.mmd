@@ -1,0 +1,16 @@
+flowchart LR
+  Inbox["Bot Inbox / Attention"] --> O["One active Orchestrator Session"]
+  O -->|"list / inspect"| Dir["Durable Assignment Directory"]
+  O -->|"create_assignment"| Gate{"Global active Assignments < limit?<br/>default 8"}
+  Gate -- "no" --> Error["Structured + LLM-readable failure<br/>no queue, no intent"]
+  Gate -- "yes" --> Runtime["Assignment Runtime"]
+  O -->|"send_assignment_request / stop_assignment"| Runtime
+  Runtime <--> W1["Independent Assignment Session A"]
+  Runtime <--> W2["Independent Assignment Session B"]
+  W1 -->|"report_to_orchestrator"| Report["Assignment Report Source Event"]
+  W1 -->|"completed Turn paired with this Report"| Completion["Host Completion Notice<br/>paired completion #194"]
+  W2 -->|"confirmed stop / native cancellation / native error / Host recovery"| Notice["Host Lifecycle Notice<br/>stop / cancellation / error #194<br/>Host recovery: unconfirmed outcome"]
+  Report --> Inbox
+  Completion --> Inbox
+  Notice --> Inbox
+  W1 -.-> Sub["DSH Subagents<br/>aggregate-only"]

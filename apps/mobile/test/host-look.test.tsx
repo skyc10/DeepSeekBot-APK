@@ -1,0 +1,432 @@
+// @vitest-environment jsdom
+import { act, createElement, type ReactElement } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+vi.mock('react-native-safe-area-context', () => ({
+  useSafeAreaInsets: () => ({ top: 0, right: 0, bottom: 0, left: 0 }),
+}));
+vi.mock('../src/ui/haptics', () => ({ haptic: vi.fn() }));
+
+vi.mock('react-native-keyboard-controller', async () => import('./keyboard-controller-shim'));
+const alert = vi.fn();
+vi.mock('react-native-safe-area-context', () => ({
+  useSafeAreaInsets: () => ({ top: 0, bottom: 0, left: 0, right: 0 }),
+}));
+vi.mock('react-native', async () => ({
+  ...(await import('./react-native-shim')),
+  Alert: { alert: (...args: unknown[]) => alert(...args) },
+}));
+vi.mock('expo-symbols', () => ({
+  SymbolView: ({ name }: { name: { android: string } }) =>
+    createElement('i', { 'data-symbol': name.android }),
+}));
+vi.mock('react-native-svg', () => ({
+  default: () => null,
+  Path: () => null,
+  SvgXml: () => null,
+  Defs: () => null,
+  LinearGradient: () => null,
+  Rect: () => null,
+  Stop: () => null,
+}));
+
+import { createHostLooks, parseHostLook } from '../src/host/host-look';
+import { accountHostLookId, accountHostLookTarget } from '../src/host/account-host-look';
+import {
+  DEFAULT_HOST_LOOK,
+  HOST_COLOR_IDS,
+  hostColorInk,
+  nearestHostColor,
+  shownHostName,
+  type HostLook,
+} from '../src/ui/design/host-look';
+import { contrast, resolveTheme } from '../src/ui/design/resolve-theme';
+import { HostLookEditor, type HostLookActions } from '../src/ui/shell/host-look-editor';
+import { t } from '../src/ui/strings';
+
+Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+
+describe('Host look model', () => {
+  it('falls back to the default for stored values it does not understand', () => {
+    expect(parseHostLook(undefined)).toEqual(DEFAULT_HOST_LOOK);
+    expect(
+      parseHostLook({ icon: { kind: 'symbol', id: 'not-a-symbol' }, color: 'chartreuse' }),
+    ).toEqual(DEFAULT_HOST_LOOK);
+    expect(parseHostLook({ icon: { kind: 'emoji', emoji: 'not an emoji' } })).toEqual(
+      DEFAULT_HOST_LOOK,
+    );
+    expect(parseHostLook({ icon: { kind: 'emoji', emoji: '🚀' }, color: 'teal' })).toEqual({
+      icon: { kind: 'emoji', emoji: '🚀' },
+      color: 'teal',
+    });
+  });
+
+  it('carries an old banner colour over as the nearest preset and drops avatars', () => {
+    expect(
+      parseHostLook({
+        name: 'Studio',
+        avatar: { kind: 'image', uri: 'file:///a.png' },
+        banner: { kind: 'color', color: '#E8613C' },
+      }),
+    ).toEqual({ name: 'Studio', icon: DEFAULT_HOST_LOOK.icon, color: 'red' });
+    expect(
+      parseHostLook({
+        avatar: { kind: 'preset', id: 'sora' },
+        banner: { kind: 'gradient', from: '#2e9e4f', to: '#0f8a7e' },
+      }),
+    ).toEqual({ icon: DEFAULT_HOST_LOOK.icon, color: 'green' });
+    expect(
+      parseHostLook({ avatar: { kind: 'initial' }, banner: { kind: 'image', uri: 'x' } }),
+    ).toEqual(DEFAULT_HOST_LOOK);
+    expect(parseHostLook({ banner: { kind: 'accent' } })).toEqual(DEFAULT_HOST_LOOK);
+    expect(nearestHostColor('#2f80ed')).toBe('blue');
+  });
+
+  it('keeps a trimmed local name and drops a blank one', () => {
+    expect(parseHostLook({ name: '  Studio Mac  ' }).name).toBe('Studio Mac');
+    expect(parseHostLook({ name: '   ' })).toEqual(DEFAULT_HOST_LOOK);
+    expect(shownHostName(parseHostLook({ name: 'Home' }), 'vm')).toBe('Home');
+    expect(shownHostName(DEFAULT_HOST_LOOK, 'vm')).toBe('vm');
+  });
+
+  it('keeps one look per Host and saves every change', async () => {
+    const write = vi.fn();
+    const looks = createHostLooks({
+      read: async () => ({ studio: { icon: { kind: 'symbol', id: 'laptop' }, color: 'green' } }),
+      write,
+    });
+    await Promise.resolve();
+    expect(looks.look('studio')).toEqual({
+      icon: { kind: 'symbol', id: 'laptop' },
+      color: 'green',
+    });
+    expect(looks.look('laptop')).toEqual(DEFAULT_HOST_LOOK);
+    expect(write).not.toHaveBeenCalled();
+
+    const next: HostLook = { icon: { kind: 'emoji', emoji: '🏠' }, color: 'orange' };
+    looks.set('laptop', next);
+    expect(looks.look('laptop')).toEqual(next);
+    expect(write).toHaveBeenLastCalledWith({
+      studio: { icon: { kind: 'symbol', id: 'laptop' }, color: 'green' },
+      laptop: next,
+    });
+  });
+
+  it('rewrites old looks once and forgets their pictures', async () => {
+    const write = vi.fn();
+    const forgetLegacyImages = vi.fn();
+    const looks = createHostLooks({
+      read: async () => ({
+        studio: {
+          name: 'Studio',
+          avatar: { kind: 'image', uri: 'file:///host-looks/a.jpg' },
+          banner: { kind: 'color', color: '#8e44ec' },
+        },
+      }),
+      write,
+      forgetLegacyImages,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(looks.look('studio')).toEqual({
+      name: 'Studio',
+      icon: DEFAULT_HOST_LOOK.icon,
+      color: 'purple',
+    });
+    expect(write).toHaveBeenCalledWith({
+      studio: { name: 'Studio', icon: DEFAULT_HOST_LOOK.icon, color: 'purple' },
+    });
+    expect(forgetLegacyImages).toHaveBeenCalledOnce();
+  });
+
+  it('keeps every preset colour visible against the screen in both schemes', () => {
+    for (const scheme of ['light', 'dark'] as const) {
+      const { color } = resolveTheme(scheme);
+      for (const id of [undefined, ...HOST_COLOR_IDS])
+        expect(
+          contrast(hostColorInk(scheme, color, id), color.base),
+          `${scheme} ${id ?? 'theme'}`,
+        ).toBeGreaterThanOrEqual(3);
+    }
+  });
+});
+
+let root: Root | undefined;
+let host: HTMLElement | undefined;
+afterEach(() => {
+  act(() => root?.unmount());
+  host?.remove();
+  root = undefined;
+});
+
+async function render(element: ReactElement): Promise<HTMLElement> {
+  host = document.createElement('div');
+  document.body.append(host);
+  root = createRoot(host);
+  await act(async () => root!.render(element));
+  return host;
+}
+
+function actions(overrides: Partial<HostLookActions> = {}): HostLookActions {
+  return { onSave: vi.fn(), onClose: vi.fn(), ...overrides };
+}
+
+const button = (view: HTMLElement, label: string) =>
+  view.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`);
+
+describe('Customize computer sheet', () => {
+  it('picks a preset symbol, an emoji and an accent colour', async () => {
+    const handlers = actions();
+    const view = await render(
+      <HostLookEditor hostName="vm" look={DEFAULT_HOST_LOOK} actions={handlers} />,
+    );
+    expect(view.textContent).toContain(t.hostLook);
+
+    await act(async () => button(view, t.hostSymbol.server)!.click());
+    expect(handlers.onSave).not.toHaveBeenCalled();
+
+    await act(async () => button(view, t.hostColorName.orange)!.click());
+    expect(handlers.onSave).not.toHaveBeenCalled();
+
+    await act(async () => button(view, t.hostIconEmoji)!.click());
+    expect(button(view, t.hostSymbol.server)).toBeNull();
+    await act(async () => button(view, '🚀')!.click());
+    expect(handlers.onSave).not.toHaveBeenCalled();
+    await act(async () => button(view, t.hostLookSave)!.click());
+    expect(handlers.onSave).toHaveBeenCalledExactlyOnceWith({
+      icon: { kind: 'emoji', emoji: '🚀' },
+      color: 'orange',
+    });
+    expect(handlers.onClose).toHaveBeenCalledOnce();
+  });
+
+  it('goes back to the theme colour', async () => {
+    const handlers = actions();
+    const view = await render(
+      <HostLookEditor
+        hostName="vm"
+        look={{ name: 'Studio', icon: { kind: 'symbol', id: 'lab' }, color: 'pink' }}
+        actions={handlers}
+      />,
+    );
+    expect(button(view, t.hostColorName.pink)!.getAttribute('aria-selected')).toBe('true');
+    await act(async () => button(view, t.hostColorDefault)!.click());
+    expect(handlers.onSave).not.toHaveBeenCalled();
+    await act(async () => button(view, t.hostLookSave)!.click());
+    expect(handlers.onSave).toHaveBeenLastCalledWith({
+      name: 'Studio',
+      icon: { kind: 'symbol', id: 'lab' },
+    });
+  });
+
+  it('renames the computer on the phone and falls back to its own name when cleared', async () => {
+    const handlers = actions();
+    const view = await render(
+      <HostLookEditor hostName="vm" look={DEFAULT_HOST_LOOK} actions={handlers} />,
+    );
+    const field = view.querySelector<HTMLTextAreaElement>(
+      `textarea[aria-label="${t.hostLookName}"]`,
+    )!;
+    expect(field.placeholder).toBe('vm');
+    const type = async (text: string) =>
+      act(async () => {
+        const setter = Object.getOwnPropertyDescriptor(
+          HTMLTextAreaElement.prototype,
+          'value',
+        )!.set!;
+        setter.call(field, text);
+        field.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+    await type('Studio ');
+    expect(handlers.onSave).not.toHaveBeenCalled();
+    expect(view.textContent).toContain('Studio');
+    await type('');
+    await act(async () => button(view, t.hostLookSave)!.click());
+    expect(handlers.onSave).toHaveBeenLastCalledWith(DEFAULT_HOST_LOOK);
+  });
+
+  it('shows a saved look that arrives after the sheet opens', async () => {
+    const handlers = actions();
+    const view = await render(
+      <HostLookEditor hostName="vm" look={DEFAULT_HOST_LOOK} actions={handlers} />,
+    );
+    const saved: HostLook = { name: 'Studio', icon: { kind: 'emoji', emoji: '🦊' }, color: 'teal' };
+    await act(async () =>
+      root!.render(<HostLookEditor hostName="vm" look={saved} actions={handlers} />),
+    );
+    const field = view.querySelector<HTMLTextAreaElement>(
+      `textarea[aria-label="${t.hostLookName}"]`,
+    )!;
+    expect(field.value).toBe('Studio');
+    expect(button(view, '🦊')!.getAttribute('aria-selected')).toBe('true');
+  });
+
+  it('resets after confirming and closes', async () => {
+    const handlers = actions();
+    const view = await render(
+      <HostLookEditor
+        hostName="vm"
+        look={{ icon: { kind: 'symbol', id: 'game' }, color: 'red' }}
+        actions={handlers}
+      />,
+    );
+    await act(async () => button(view, t.hostLookReset)!.click());
+    expect(alert.mock.calls.at(-1)![0]).toBe(t.confirmAction(t.hostLookReset));
+    const buttons = alert.mock.calls.at(-1)![2] as { text: string; onPress?: () => void }[];
+    expect(buttons.map((entry) => entry.text)).toEqual([t.cancel, t.hostLookReset]);
+    await act(async () => buttons[1]!.onPress!());
+    expect(handlers.onSave).not.toHaveBeenCalled();
+    await act(async () => button(view, t.back)!.click());
+    expect(handlers.onClose).toHaveBeenCalled();
+    expect(handlers.onSave).not.toHaveBeenCalled();
+  });
+
+  it('keeps the draft after a failed save and retries without closing early', async () => {
+    const save = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('disk-full'))
+      .mockResolvedValueOnce(undefined);
+    const handlers = actions({ onSave: save });
+    const view = await render(
+      <HostLookEditor hostName="vm" look={DEFAULT_HOST_LOOK} actions={handlers} />,
+    );
+    await act(async () => button(view, t.hostSymbol.lab)!.click());
+    await act(async () => button(view, t.hostLookSave)!.click());
+    expect(view.textContent).toContain(t.hostLookSaveFailed);
+    expect(handlers.onClose).not.toHaveBeenCalled();
+    await act(async () => button(view, t.hostLookSave)!.click());
+    expect(save).toHaveBeenLastCalledWith({ icon: { kind: 'symbol', id: 'lab' } });
+    expect(handlers.onClose).toHaveBeenCalledOnce();
+  });
+
+  it('does not overwrite an edited draft when stored appearance refreshes', async () => {
+    const handlers = actions();
+    const view = await render(
+      <HostLookEditor hostName="vm" look={DEFAULT_HOST_LOOK} actions={handlers} />,
+    );
+    await act(async () => button(view, t.hostSymbol.lab)!.click());
+    await act(async () =>
+      root!.render(
+        <HostLookEditor
+          hostName="vm"
+          look={{ icon: { kind: 'symbol', id: 'server' } }}
+          actions={handlers}
+        />,
+      ),
+    );
+    await act(async () => button(view, t.hostLookSave)!.click());
+    expect(handlers.onSave).toHaveBeenCalledWith({ icon: { kind: 'symbol', id: 'lab' } });
+  });
+});
+
+describe('new paired environment appearance', () => {
+  it('adds no storage I/O when reading many account-row appearances', async () => {
+    const read = vi.fn(async () => ({}));
+    const write = vi.fn();
+    const looks = createHostLooks({ read, write });
+    await looks.ready;
+    const reads = read.mock.calls.length;
+    for (let index = 0; index < 1000; index += 1)
+      expect(looks.look(accountHostLookId(`host-${index}`))).toBe(DEFAULT_HOST_LOOK);
+    expect(read).toHaveBeenCalledTimes(reads);
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it('keeps account appearance local and carries it into pairing without replacing a saved look', async () => {
+    let stored: Record<string, HostLook> = {};
+    const storage = {
+      read: async () => stored,
+      write: (value: Record<string, HostLook>) => {
+        stored = value;
+      },
+    };
+    const account = {
+      id: 'account-computer',
+      hostname: 'studio.connect.example',
+      name: 'Remote name',
+      online: false,
+    };
+    const target = accountHostLookTarget(account);
+    expect(target).toEqual({
+      hostId: accountHostLookId('ACCOUNT-COMPUTER'),
+      hostName: 'Remote name',
+    });
+    expect(accountHostLookId('other-computer')).not.toBe(target.hostId);
+    const custom: HostLook = {
+      name: 'My studio',
+      icon: { kind: 'emoji', emoji: '🏠' },
+      color: 'green',
+    };
+    const looks = createHostLooks(storage);
+    await looks.ready;
+    await looks.update(target.hostId, () => custom);
+    expect(account.name).toBe('Remote name');
+    const restored = createHostLooks(storage);
+    await restored.initialize('verified-host-id', ['verified-host-id'], undefined, target.hostId);
+    expect(restored.look('verified-host-id')).toEqual(custom);
+    const later: HostLook = { name: 'New local name', icon: { kind: 'symbol', id: 'desktop' } };
+    await restored.update('verified-host-id', () => later);
+    await restored.initialize('verified-host-id', ['verified-host-id'], undefined, target.hostId);
+    expect(restored.look('verified-host-id')).toEqual(later);
+    expect(restored.look(target.hostId)).toEqual(custom);
+    expect(restored.look('unrelated-host')).toEqual(DEFAULT_HOST_LOOK);
+  });
+
+  it('avoids paired icons and colors, persists the choice and preserves customization on re-pair', async () => {
+    let stored: Record<string, HostLook> = {
+      a: { icon: { kind: 'symbol', id: 'desktop' }, color: 'blue' },
+      b: { icon: { kind: 'symbol', id: 'laptop' }, color: 'indigo' },
+    };
+    const looks = createHostLooks({
+      read: async () => stored,
+      write: (value) => {
+        stored = value;
+      },
+    });
+    await looks.initialize('c', ['a', 'b', 'c'], 'Studio');
+    expect(looks.look('c')).toEqual({
+      name: 'Studio',
+      icon: { kind: 'symbol', id: 'display' },
+      color: 'purple',
+    });
+    const restored = createHostLooks({
+      read: async () => stored,
+      write: (value) => {
+        stored = value;
+      },
+    });
+    await restored.ready;
+    expect(restored.look('c')).toEqual(looks.look('c'));
+    const custom: HostLook = { name: 'Home', icon: { kind: 'emoji', emoji: '🏠' }, color: 'green' };
+    restored.set('c', custom);
+    await restored.initialize('c', ['a', 'b', 'c']);
+    expect(restored.look('c')).toEqual(custom);
+  });
+
+  it('counts legacy defaults and reuses the least-used colors after the palette is exhausted', async () => {
+    let stored: Record<string, HostLook> = {};
+    const looks = createHostLooks({
+      read: async () => stored,
+      write: (value) => {
+        stored = value;
+      },
+    });
+    await looks.initialize('first', ['legacy', 'first']);
+    expect(looks.look('first')).toEqual({
+      icon: { kind: 'symbol', id: 'laptop' },
+      color: 'indigo',
+    });
+    const ids: string[] = ['legacy', 'first'];
+    for (let index = 0; index < HOST_COLOR_IDS.length; index++) {
+      const id = `host-${index}`;
+      await looks.initialize(id, ids);
+      ids.push(id);
+    }
+    const counts = HOST_COLOR_IDS.map(
+      (color) => ids.filter((id) => (looks.look(id).color ?? 'blue') === color).length,
+    );
+    expect(Math.max(...counts) - Math.min(...counts)).toBeLessThanOrEqual(1);
+    expect(looks.look('legacy')).toEqual(DEFAULT_HOST_LOOK);
+  });
+});

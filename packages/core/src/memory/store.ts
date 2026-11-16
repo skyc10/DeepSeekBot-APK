@@ -1,0 +1,175 @@
+import { mkdirSync, readFileSync, statSync } from 'node:fs';
+import { dirname } from 'node:path';
+
+import { atomicWriteFile } from '../fs/atomic-write.js';
+import {
+  parseMemoryFile,
+  serializeMemoryFile,
+  type MemoryDocument,
+  type ParsedMemoryFile,
+} from './front-matter.js';
+import { createMemoryGit, type MemoryCommit } from './git.js';
+import { ensureMemoryRepository } from './repository.js';
+import { resolveMemoryPath, toMemoryRelativePath, toMemoryWritePath } from './jail.js';
+import { searchMemoryFiles, type MemorySearchFile, type MemorySearchHit } from './search.js';
+import { listMemoryFiles, readMemoryDocument } from './files.js';
+import { renderStandingPrompt, type StandingLimits } from './soul.js';
+
+export class MemoryWriteError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'MemoryWriteError';
+  }
+}
+
+export interface MemoryStoreOptions {
+  memoryDir: string;
+  now?: () => Date;
+}
+
+export interface MemoryEntry {
+  path: string;
+  summary: string;
+  updatedAt: string;
+  sources: string[];
+  tags?: string[];
+  body: string;
+  warnings: string[];
+}
+
+export interface MemoryWriteInput {
+  path: string;
+  body: string;
+  summary: string;
+  sources?: string[];
+  tags?: string[];
+  source?: 'agent' | 'human';
+}
+
+export interface MemoryWriteResult {
+  ok: true;
+  path: string;
+  summary: string;
+  updatedAt: string;
+  commit: string;
+}
+
+export interface MemoryStore {
+  memoryDir: string;
+  read(path: string): MemoryEntry | undefined;
+  write(input: MemoryWriteInput): Promise<MemoryWriteResult>;
+  search(query: string): Promise<MemorySearchHit[]>;
+  standingPrompt(limits?: StandingLimits): string;
+  history(limit?: number): MemoryCommit[];
+}
+
+function toEntry(relativePath: string, parsed: ParsedMemoryFile): MemoryEntry {
+  const { document } = parsed;
+  return {
+    path: relativePath,
+    summary: document.summary,
+    updatedAt: document.updatedAt,
+    sources: document.sources,
+    body: parsed.body,
+    warnings: parsed.warnings,
+    ...(document.tags === undefined ? {} : { tags: document.tags }),
+  };
+}
+
+function commitMessage(document: MemoryDocument, source: 'agent' | 'human'): string {
+  const lines = [document.summary, ''];
+  if (document.sources.length > 0) lines.push(`sources: ${document.sources.join(', ')}`);
+  if (source === 'human') lines.push('source=human');
+  return `${lines.join('\n').trimEnd()}\n`;
+}
+
+function listSearchFiles(root: string): MemorySearchFile[] {
+  const files: MemorySearchFile[] = [];
+  for (const relativePath of listMemoryFiles(root)) {
+    const parsed = readMemoryDocument(root, relativePath);
+    if (parsed === undefined) continue;
+    files.push({ path: relativePath, skipLines: parsed.frontMatterLines });
+  }
+  return files;
+}
+
+export function createMemoryStore(options: MemoryStoreOptions): MemoryStore {
+  const root = options.memoryDir;
+  const repository = ensureMemoryRepository({ memoryDir: root });
+  if (!repository.ok) {
+    throw new Error(`Memory Repository unavailable: ${repository.code}: ${repository.message}`);
+  }
+  const now = options.now ?? (() => new Date());
+  const git = createMemoryGit(root);
+
+  let tail: Promise<unknown> = Promise.resolve();
+  const enqueue = <T>(task: () => T | Promise<T>): Promise<T> => {
+    const run = tail.then(task, task);
+    tail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  };
+
+  const readParsed = (relativePath: string): ParsedMemoryFile | undefined => {
+    const target = resolveMemoryPath(root, relativePath);
+    let text: string;
+    let stats;
+    try {
+      text = readFileSync(target, 'utf8');
+      stats = statSync(target);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      throw error;
+    }
+    if (!stats.isFile()) return undefined;
+    return parseMemoryFile(text, { mtime: stats.mtime });
+  };
+
+  return {
+    memoryDir: root,
+    read(path) {
+      const relativePath = toMemoryRelativePath(path);
+      const parsed = readParsed(relativePath);
+      if (parsed === undefined) return undefined;
+      return toEntry(relativePath, parsed);
+    },
+    write(input) {
+      return enqueue(() => {
+        const summary = (input.summary ?? '').trim().replaceAll(/\s+/gu, ' ');
+        if (summary.length === 0) {
+          throw new MemoryWriteError('memory write requires a non-empty summary');
+        }
+        const relativePath = toMemoryWritePath(input.path);
+        const target = resolveMemoryPath(root, relativePath);
+        const document: MemoryDocument = {
+          summary,
+          updatedAt: now().toISOString(),
+          sources: input.sources ?? [],
+          ...(input.tags === undefined ? {} : { tags: input.tags }),
+        };
+        const body = input.body.endsWith('\n') ? input.body : `${input.body}\n`;
+        mkdirSync(dirname(target), { recursive: true });
+        atomicWriteFile(target, serializeMemoryFile(document, body));
+        const commit = git.commit(commitMessage(document, input.source ?? 'agent'));
+        return {
+          ok: true,
+          path: relativePath,
+          summary,
+          updatedAt: document.updatedAt,
+          commit,
+        };
+      });
+    },
+    async search(query) {
+      return searchMemoryFiles(root, listSearchFiles(root), query);
+    },
+    standingPrompt(limits) {
+      return renderStandingPrompt(root, limits);
+    },
+    history(limit) {
+      return git.log(limit);
+    },
+  };
+}

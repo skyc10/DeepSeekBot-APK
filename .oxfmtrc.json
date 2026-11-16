@@ -1,0 +1,27 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "printWidth": 100,
+  "singleQuote": true,
+  "semi": true,
+  "trailingComma": "all",
+  "tabWidth": 2,
+  "ignorePatterns": [
+    "dist",
+    "coverage",
+    "pnpm-lock.yaml",
+    ".agents",
+    ".claude",
+    "agent",
+    "apps/docs",
+    "apps/presentations/CLAUDE.md",
+    "apps/mobile/modules/local-computer-video/android/src/main/assets/local-computer-video",
+    "reference",
+    ".scratch",
+    "packages/computer/lib",
+    "packages/browser/lib",
+    "packages/vrm-companion/assets",
+    "packages/vrm-companion/lib",
+    "scripts/source-policy-baseline.json",
+    "packages/client/vendor/dsh-ui-theme-022-rc2"
+  ]
+}

@@ -1,0 +1,355 @@
+import {
+  useRef,
+  useState,
+  type DragEvent as ReactDragEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
+  type ReactElement,
+  type ReactNode,
+} from 'react';
+import * as stylex from '@stylexjs/stylex';
+import { IconChevronDownOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives';
+
+import { InstantTooltipScope, Tooltip } from './tooltip.js';
+import { border, color, radius, size, space, text } from './tokens.stylex.js';
+
+const styles = stylex.create({
+  header: {
+    display: 'flex',
+    alignItems: 'center',
+    minWidth: 0,
+    marginBlock: space.x1,
+    marginInline: space.x2,
+  },
+  head: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: space.x3,
+    flexGrow: 1,
+    flexShrink: 1,
+    flexBasis: 0,
+    minWidth: 0,
+    height: size.row,
+    paddingBlock: 0,
+    paddingInline: space.x3,
+    borderWidth: 0,
+    borderStyle: 'none',
+    borderRadius: radius.sm,
+    backgroundColor: { default: 'transparent', ':hover': color.hover },
+    color: 'inherit',
+    fontFamily: 'inherit',
+    textAlign: 'start',
+    cursor: 'pointer',
+    outline: { default: 'none', ':focus-visible': `${border.focus} solid ${color.accent}` },
+    outlineOffset: '-2px',
+  },
+  static: {
+    cursor: 'default',
+    backgroundColor: 'transparent',
+  },
+  locked: {
+    pointerEvents: 'none',
+  },
+  dimmed: { cursor: 'default', opacity: 0.6 },
+  fixed: { flexGrow: 0, flexBasis: 'auto', maxWidth: '40%' },
+  compact: { flexGrow: 0, flexBasis: 'auto', cursor: 'grab' },
+  hugged: { flexGrow: 0, flexBasis: 'auto' },
+  context: { display: 'flex', alignItems: 'center', minWidth: 0, flexShrink: 1 },
+  draggableHead: { cursor: { default: 'grab', ':active': 'grabbing' } },
+  spacer: { flexGrow: 1 },
+  chevron: {
+    display: 'inline-flex',
+    flexShrink: 0,
+    color: color.subtle,
+    transition: 'transform 150ms var(--ds-ease-in-out)',
+  },
+  collapsed: { transform: 'rotate(-90deg)' },
+  icon: {
+    display: 'inline-flex',
+    flexShrink: 0,
+    color: color.muted,
+  },
+  label: {
+    flexGrow: 1,
+    flexShrink: 1,
+    flexBasis: 0,
+    minWidth: 0,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+    fontSize: text.titleSize,
+    lineHeight: text.titleLine,
+  },
+  labelFixed: { flexGrow: 0, flexBasis: 'auto' },
+  struck: { textDecoration: 'line-through', opacity: 0.6 },
+  badge: {
+    display: 'inline-flex',
+    flexShrink: { default: 0, ':has(.bh-channel-sidebar-summary)': 1 },
+    minWidth: 0,
+    maxWidth: { default: 'none', ':has(.bh-channel-sidebar-summary)': '55%' },
+  },
+  tabs: {
+    display: 'flex',
+    alignItems: 'center',
+    flexGrow: 1,
+    flexShrink: 1,
+    flexBasis: 0,
+    minWidth: 0,
+    overflowX: 'auto',
+    whiteSpace: 'nowrap',
+  },
+  tabsCompact: { flexGrow: 0, flexBasis: 'auto' },
+  action: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    minWidth: 0,
+    maxWidth: { default: 'none', ':has([data-session-target])': '60%' },
+    flexShrink: { default: 0, ':has([data-session-target])': 1 },
+    paddingInlineEnd: space.x1,
+  },
+});
+
+export interface PanelHeaderDisclosure {
+  readonly expanded: boolean;
+  readonly controls: string;
+  readonly disabled: boolean;
+  readonly chevron: boolean;
+  readonly onToggle: (() => void) | undefined;
+}
+
+export interface PanelHeadDrag {
+  readonly onDragStart: (event: ReactDragEvent<HTMLElement>) => void;
+  readonly onDragEnd: () => void;
+  readonly onKeyDown: (event: ReactKeyboardEvent<HTMLElement>) => void;
+}
+
+interface PressOrigin {
+  x: number;
+  y: number;
+  moved: boolean;
+}
+
+function usePressOrigin(): {
+  readonly trackDown: (event: ReactPointerEvent<HTMLElement>) => void;
+  readonly trackMove: (event: ReactPointerEvent<HTMLElement>) => void;
+  readonly trackCancel: () => void;
+  readonly markMoved: () => void;
+  readonly reset: () => void;
+  readonly pressedMove: (event: ReactMouseEvent<HTMLElement>) => boolean;
+} {
+  const pointer = useRef<PressOrigin | undefined>(undefined);
+  return {
+    trackDown: (event) => {
+      if (event.button === 0)
+        pointer.current = { x: event.clientX, y: event.clientY, moved: false };
+    },
+    trackMove: (event) => {
+      const origin = pointer.current;
+      if (origin && Math.hypot(event.clientX - origin.x, event.clientY - origin.y) > 5)
+        origin.moved = true;
+    },
+    trackCancel: () => {
+      if (pointer.current) pointer.current.moved = true;
+    },
+    markMoved: () => {
+      if (pointer.current) pointer.current.moved = true;
+    },
+    reset: () => {
+      pointer.current = undefined;
+    },
+    pressedMove: (event) => {
+      const origin = pointer.current;
+      pointer.current = undefined;
+      return (
+        event.detail !== 0 &&
+        !!origin &&
+        (origin.moved || Math.hypot(event.clientX - origin.x, event.clientY - origin.y) > 5)
+      );
+    },
+  };
+}
+
+export function PanelHeader({
+  icon,
+  label,
+  badge,
+  tabs,
+  action,
+  context,
+  headDrag,
+  disclosure,
+  onHide,
+  hideLabel,
+  hideHint,
+  dimmed = false,
+  locked = false,
+  struck = false,
+}: {
+  readonly icon?: ReactNode;
+  readonly label: ReactNode;
+  readonly badge?: ReactNode;
+  readonly tabs?: ReactNode;
+  readonly action?: ReactNode;
+  readonly context?: ReactNode;
+  readonly headDrag?: PanelHeadDrag | undefined;
+  readonly disclosure?: PanelHeaderDisclosure | undefined;
+  readonly onHide?: () => void;
+  readonly hideLabel?: string;
+  readonly hideHint?: string;
+  readonly dimmed?: boolean;
+  readonly locked?: boolean;
+  readonly struck?: boolean;
+}): ReactElement {
+  const press = usePressOrigin();
+  const [dragging, setDragging] = useState(false);
+  const labelRef = useRef<HTMLSpanElement>(null);
+  const hint = () => {
+    const node = labelRef.current;
+    const clipped = node !== null && node.scrollWidth > node.clientWidth;
+    return clipped && typeof label === 'string' ? `${label} · ${hideHint ?? ''}` : (hideHint ?? '');
+  };
+  const fixed = tabs !== undefined;
+  const hug = !!onHide || (context !== undefined && disclosure === undefined);
+  const content = (
+    <>
+      {icon === undefined ? null : (
+        <span aria-hidden="true" {...stylex.props(styles.icon)}>
+          {icon}
+        </span>
+      )}
+      <span
+        ref={labelRef}
+        data-panel-label=""
+        title={typeof label === 'string' && hideHint === undefined ? label : undefined}
+        {...stylex.props(
+          styles.label,
+          (fixed || hug) && styles.labelFixed,
+          struck && styles.struck,
+        )}
+      >
+        {label}
+      </span>
+      {badge === undefined || onHide ? null : <span {...stylex.props(styles.badge)}>{badge}</span>}
+    </>
+  );
+  return (
+    <div {...stylex.props(styles.header)}>
+      {onHide ? (
+        <Tooltip label={hint} side="bottom" portal disabled={hideHint === undefined || dragging}>
+          <button
+            type="button"
+            data-panel-head=""
+            data-panel-hide=""
+            data-window-drag-recall
+            draggable
+            aria-label={hideLabel}
+            onPointerDown={(event) => press.trackDown(event)}
+            onPointerMove={(event) => press.trackMove(event)}
+            onPointerCancel={() => press.trackCancel()}
+            onDragStart={() => {
+              press.markMoved();
+              setDragging(true);
+            }}
+            onDragEnd={() => setDragging(false)}
+            onClick={(event) => {
+              event.stopPropagation();
+              if (!press.pressedMove(event)) onHide();
+            }}
+            {...stylex.props(styles.head, fixed && styles.fixed, styles.compact)}
+          >
+            {content}
+          </button>
+        </Tooltip>
+      ) : disclosure === undefined ? (
+        <div
+          data-panel-head=""
+          {...stylex.props(
+            styles.head,
+            styles.static,
+            fixed && styles.fixed,
+            hug && styles.hugged,
+            dimmed && styles.dimmed,
+          )}
+        >
+          {content}
+        </div>
+      ) : (
+        <button
+          type="button"
+          data-panel-head=""
+          aria-expanded={disclosure.expanded}
+          aria-controls={disclosure.controls}
+          aria-disabled={dimmed ? true : undefined}
+          disabled={disclosure.disabled}
+          draggable={headDrag !== undefined}
+          aria-keyshortcuts={headDrag === undefined ? undefined : 'Alt+ArrowUp Alt+ArrowDown'}
+          onPointerDown={(event) => {
+            if (headDrag !== undefined) press.trackDown(event);
+          }}
+          onPointerMove={(event) => press.trackMove(event)}
+          onPointerCancel={() => press.trackCancel()}
+          onDragStart={(event) => {
+            press.markMoved();
+            headDrag?.onDragStart(event);
+          }}
+          onDragEnd={() => {
+            press.reset();
+            headDrag?.onDragEnd();
+          }}
+          onClick={(event) => {
+            if (press.pressedMove(event)) {
+              event.stopPropagation();
+              return;
+            }
+            disclosure.onToggle?.();
+          }}
+          onKeyDown={headDrag === undefined ? undefined : (event) => headDrag.onKeyDown(event)}
+          {...stylex.props(
+            styles.head,
+            fixed && styles.fixed,
+            dimmed && styles.dimmed,
+            locked && styles.locked,
+            headDrag !== undefined && styles.draggableHead,
+          )}
+        >
+          {disclosure.chevron ? (
+            <span
+              aria-hidden="true"
+              data-panel-chevron=""
+              {...stylex.props(styles.chevron, !disclosure.expanded && styles.collapsed)}
+            >
+              <IconChevronDownOutlineRegular size={14} />
+            </span>
+          ) : null}
+          {content}
+        </button>
+      )}
+      {onHide && badge !== undefined ? (
+        <span data-panel-badge="" data-window-drag-recall {...stylex.props(styles.badge)}>
+          {badge}
+        </span>
+      ) : null}
+      {context === undefined ? null : (
+        <span data-panel-context="" data-window-drag-recall {...stylex.props(styles.context)}>
+          {context}
+        </span>
+      )}
+      {tabs === undefined ? null : (
+        <span
+          data-panel-tabs=""
+          data-window-drag-recall
+          {...stylex.props(styles.tabs, !!onHide && styles.tabsCompact)}
+        >
+          {tabs}
+        </span>
+      )}
+      {hug ? <span aria-hidden="true" {...stylex.props(styles.spacer)} /> : null}
+      {action === undefined ? null : (
+        <span data-panel-actions="" data-window-drag-recall {...stylex.props(styles.action)}>
+          <InstantTooltipScope>{action}</InstantTooltipScope>
+        </span>
+      )}
+    </div>
+  );
+}

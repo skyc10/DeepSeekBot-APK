@@ -1,0 +1,188 @@
+import { describe, expect, it } from 'vitest';
+
+import {
+  activeMentionQuery,
+  appendMention,
+  deleteSelectedMention,
+  mentionRuns,
+  quoteMention,
+  rebaseMentions,
+  selectMention,
+  sessionBotReference,
+} from '../src/client/mentions.js';
+
+describe('selected Channel mentions', () => {
+  it('keeps stable identities through unrelated edits and drops an edited token', () => {
+    const first = selectMention('@Al', [], { start: 0, end: 3, query: 'Al' }, 'ada', 'Alex');
+    expect(first).toEqual({
+      value: '@Alex ',
+      mentions: [{ botSlug: 'ada', label: 'Alex', start: 0, end: 5 }],
+      caret: 6,
+    });
+    const second = selectMention(
+      '@Alex @Al',
+      first.mentions,
+      { start: 6, end: 9, query: 'Al' },
+      'bea',
+      'Alex',
+    );
+    expect(second.mentions.map((item) => item.botSlug)).toEqual(['ada', 'bea']);
+    expect(rebaseMentions(second.value, 'Please ' + second.value, second.mentions)).toEqual(
+      second.mentions.map((item) => ({
+        ...item,
+        start: item.start + 7,
+        end: item.end + 7,
+      })),
+    );
+    expect(rebaseMentions(second.value, '@Aex @Alex ', second.mentions)).toEqual([
+      { ...second.mentions[1]!, start: 5, end: 10 },
+    ]);
+  });
+
+  it('renders only selected identities and deletes each token atomically', () => {
+    const mentions = [
+      { botSlug: 'ada', label: 'Ada', start: 0, end: 4 },
+      { botSlug: 'bea', label: 'Bea', start: 12, end: 16 },
+    ];
+    const value = '@Ada please @Bea reply';
+    expect(mentionRuns(value, mentions).map((run) => [run.text, run.mention?.botSlug])).toEqual([
+      ['@Ada', 'ada'],
+      [' please ', undefined],
+      ['@Bea', 'bea'],
+      [' reply', undefined],
+    ]);
+    expect(deleteSelectedMention(value, mentions, 5, 5, 'Backspace')).toEqual({
+      value: 'please @Bea reply',
+      mentions: [{ ...mentions[1]!, start: 7, end: 11 }],
+      caret: 0,
+    });
+    expect(deleteSelectedMention(value, mentions, 12, 12, 'Delete')).toEqual({
+      value: '@Ada please reply',
+      mentions: [mentions[0]],
+      caret: 12,
+    });
+    expect(deleteSelectedMention(value, mentions, 6, 6, 'Backspace')).toBeUndefined();
+    expect(mentionRuns('@Ada plain', [{ ...mentions[0]!, label: 'Bea' }])).toEqual([
+      { text: '@Ada plain' },
+    ]);
+  });
+
+  it('serializes native Session Bot references without the file-mention token shape', () => {
+    expect(sessionBotReference('ada')).toBe('\u2060@ada');
+  });
+
+  it('opens the picker after CJK text and punctuation but not inside an email address', () => {
+    const first = [{ botSlug: 'lead', label: '主管', start: 0, end: 3 }];
+    expect(activeMentionQuery('@主管 你吃饭。@', 9, first)).toEqual({
+      start: 8,
+      end: 9,
+      query: '',
+    });
+    expect(activeMentionQuery('@主管 你吃饭。@画', 10, first)).toEqual({
+      start: 8,
+      end: 10,
+      query: '画',
+    });
+    expect(activeMentionQuery('请@主管', 4, [])).toEqual({ start: 1, end: 4, query: '主管' });
+    expect(activeMentionQuery('mail ada@example', 16, [])).toBeUndefined();
+  });
+
+  it('does not turn typed or pasted names into selected identities', () => {
+    expect(activeMentionQuery('@Ada', 4, [])).toEqual({ start: 0, end: 4, query: 'Ada' });
+    expect(
+      activeMentionQuery('@Ada ', 5, [{ botSlug: 'ada', label: 'Ada', start: 0, end: 4 }]),
+    ).toBeUndefined();
+    expect(rebaseMentions('', '@Ada', [])).toEqual([]);
+  });
+});
+
+describe('appendMention', () => {
+  it('appends a spaced mention token and keeps earlier ones', () => {
+    const empty = appendMention('', [], 'ada', 'Ada');
+    expect(empty).toEqual({
+      value: '@Ada ',
+      mentions: [{ botSlug: 'ada', label: 'Ada', start: 0, end: 4 }],
+      caret: 5,
+    });
+    const next = appendMention(
+      'hi' + empty.value + 'there',
+      empty.mentions.map((item) => ({ ...item, start: item.start + 2, end: item.end + 2 })),
+      'bea',
+      'Bea',
+    );
+    expect(next.value).toBe('hi@Ada there @Bea ');
+    expect(next.mentions.map((item) => [item.botSlug, item.start])).toEqual([
+      ['ada', 2],
+      ['bea', 13],
+    ]);
+    expect(next.caret).toBe(next.value.length);
+  });
+
+  it('does not repeat a Bot that is already mentioned', () => {
+    const first = appendMention('', [], 'ada', 'Ada');
+    expect(appendMention(first.value, first.mentions, 'ada', 'Ada')).toEqual({
+      value: first.value,
+      mentions: first.mentions,
+      caret: first.value.length,
+    });
+  });
+});
+
+describe('quoteMention', () => {
+  it('puts the quoted Bot first in an empty or written draft', () => {
+    expect(quoteMention('', [], 'ada', 'Ada')).toEqual({
+      value: '@Ada ',
+      mentions: [{ botSlug: 'ada', label: 'Ada', start: 0, end: 4 }],
+      caret: 5,
+    });
+    const written = quoteMention(
+      'see @Bea',
+      [{ botSlug: 'bea', label: 'Bea', start: 4, end: 8 }],
+      'ada',
+      'Ada',
+    );
+    expect(written.value).toBe('@Ada see @Bea');
+    expect(written.mentions).toEqual([
+      { botSlug: 'ada', label: 'Ada', start: 0, end: 4 },
+      { botSlug: 'bea', label: 'Bea', start: 9, end: 13 },
+    ]);
+    expect(written.caret).toBe(written.value.length);
+  });
+
+  it('keeps a selected mention at the start of the draft', () => {
+    const next = quoteMention(
+      '@Bea hi',
+      [{ botSlug: 'bea', label: 'Bea', start: 0, end: 4 }],
+      'ada',
+      'Ada',
+    );
+    expect(next.value).toBe('@Ada @Bea hi');
+    expect(next.mentions).toEqual([
+      { botSlug: 'ada', label: 'Ada', start: 0, end: 4 },
+      { botSlug: 'bea', label: 'Bea', start: 5, end: 9 },
+    ]);
+  });
+
+  it('keeps the next mention when the quoted mention is deleted', () => {
+    const quoted = quoteMention(
+      '@Bea hi',
+      [{ botSlug: 'bea', label: 'Bea', start: 0, end: 4 }],
+      'ada',
+      'Ada',
+    );
+    expect(deleteSelectedMention(quoted.value, quoted.mentions, 5, 5, 'Backspace')).toEqual({
+      value: '@Bea hi',
+      mentions: [{ botSlug: 'bea', label: 'Bea', start: 0, end: 4 }],
+      caret: 0,
+    });
+  });
+
+  it('leaves a draft that already mentions the quoted Bot alone', () => {
+    const mentions = [{ botSlug: 'ada', label: 'Ada', start: 3, end: 7 }];
+    expect(quoteMention('hi @Ada ', mentions, 'ada', 'Ada')).toEqual({
+      value: 'hi @Ada ',
+      mentions,
+      caret: 8,
+    });
+  });
+});

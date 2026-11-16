@@ -1,0 +1,171 @@
+# Native cleanup regression — pending execution
+
+This is an executable debugger-assisted native QA procedure, not an automated pass. Run
+only in the testing center's assigned Windows/physical-Android batch against its rebuilt
+Debug APK and isolated Host. The module currently has no JUnit, Robolectric or Android
+instrumentation runner configured. Sibling modules' test dependencies are not inherited
+here. No new test dependency or framework is introduced for this procedure.
+
+Record batch SHA, native fingerprint/APK, Host/helper provenance, phone ABI, and each
+`pass / fail / untested` outcome. Keep offer SDP, device identifiers and screenshots with
+unrelated screen content private. A native source breakpoint is fault injection, not a
+production setting, and it must be removed before normal performance measurement.
+
+## Set up controlled disposal
+
+1. Through the existing authorized Android QA workflow, build/install/open the Debug app,
+   pair with the batch Host, and establish moving video. Keep this viewer observing; do not
+   take control. Attach Android Studio's Java debugger to this app process.
+2. In `LocalComputerVideoView.kt`, set a breakpoint on the first native-release invocation
+   inside the `worker.execute` body of `Attempt.close()` (the `listOf<() -> Unit>` teardown).
+   Set **Suspend: Thread**, not All. The `LocalVideoPeer` worker must be paused while the
+   Android main thread continues to run the three-second deadline.
+3. Set logpoints/breakpoints, also Thread-only, immediately before `createEglSurface(surface)`
+   in `Attempt.start()` and in the main-thread cleanup completion immediately before
+   `retiring = null`. Observe only attempt labels, object identity, ordering and monotonic
+   elapsed time. Do not log offer SDP or frame pixels. A breakpoint suspending every thread
+   invalidates the deadline test.
+
+## Production reconnect and cross-view exclusion
+
+1. Close the viewer normally. At the worker breakpoint, retain the retiring `Attempt` in
+   the debugger and note `closed == true`, the view's `current == null`, and `retiring`
+   pointing at this attempt. Let the main thread keep running.
+2. Reopen the Computer through the app while the old worker remains held. The route keys
+   native views by attempt, so this production path can create a _different_ TextureView.
+   Its peer must be refused with `native-cleanup-pending`; it must never reach
+   `createEglSurface` while the old worker owns `nativeSlot`. The Host must remain healthy.
+3. Continue the old worker. After all release calls complete, the permit is returned once.
+   Use the explicit Reconnect action. Only a new server-issued attempt may reach native
+   initialization and present the moving fixture. Verify no automatic takeover and no
+   stale presentation callbacks from the retired attempt.
+
+This row verifies cross-view exclusion. It does not by itself verify same-SurfaceTexture
+replacement, because the route currently remounts the native view.
+
+## Same-surface delayed handoff and late deadline
+
+Use the already attached native view's debugger fields to exercise the native prop contract
+without adding a product debug route. This is an isolated resource-lifecycle test: local
+labels `B` and `C` below are not Host-authorized grants, and their events must not be treated
+as production video acceptance or sent as control commands.
+
+1. Start another fresh authorized observation and pause the main thread in the view's
+   `sync()` using a method breakpoint. In the debugger's Evaluate Expression, retain that
+   `LocalComputerVideoView` as `view`; retain its `texture.surfaceTexture` identity as `S`.
+   Use Kotlin evaluation against this object to assign a distinct `view.attemptId` label
+   `B`, preserving the existing valid video-only offer, then call `view.sync()` on the main
+   thread. This is the same sequence as a changed native prop on an existing view.
+2. Let the main thread run. Hold the retiring worker at the teardown breakpoint from Set
+   up. While it is held, verify that `view.current` stays null, `view.retiring` remains the
+   old attempt, and no `createEglSurface(S)` call occurs for B. Repeated `view.sync()` calls
+   must have the same result. Do not claim playback of B: its label is intentionally not a
+   Host binding and the app must ignore its signaling/presentation callbacks.
+3. For the **before-deadline** row, release the old worker before three seconds. Verify
+   ordered events: all old native resources released → main-thread `retiring = null` → at
+   most one initialization for B on S. No second producer may attach before old release.
+   End this isolated native attempt and return to a fresh authorized observation.
+4. Repeat the same setup for the **after-deadline** row, holding the worker for at least
+   four seconds while the main thread runs. At the deadline inspect
+   `view.suspendedAttempt == view.attemptId` (B), `view.current == null`, and the
+   `native-cleanup-timeout` event. This fence must already hold before any JavaScript error
+   handler runs; use a JavaScript debugger pause if needed while leaving native main active.
+5. Release the worker after the deadline. Verify the old resources finish disposal and
+   `retiring` clears, but B never reaches `createEglSurface(S)`. Repeated `view.sync()` and
+   reapplying unchanged B props must not reopen it. Only a different attempt label C can
+   request initialization after completed cleanup; a real app retry obtains C from the
+   authenticated Host, never from these debugger labels.
+6. Repeat with the app backgrounded while B waits for old cleanup. Completing old cleanup
+   while backgrounded, and foregrounding with unchanged B, must not initialize B. Normal
+   foreground observation requires a newly admitted attempt, with no restored controller.
+
+If the debugger cannot evaluate the existing view on its UI thread, mark the same-surface
+rows **untested**. Do not substitute the cross-view row or a TypeScript mock. A future
+native instrumentation harness is needed to automate these object/lifecycle assertions.
+
+## Destroyed surface and delayed successful cleanup
+
+1. Hold the worker as above, then close the screen so `onSurfaceTextureDestroyed` runs.
+   Verify the destroyed surface is retained in the old attempt's `destroyedSurface` atomic
+   reference; no new producer can attach to it. Keep main running past the deadline.
+2. Release the worker after four seconds. Verify `resourcesDisposed` becomes true and
+   the deferred surface is claimed by `getAndSet(null)` and released once. There is no
+   abandoned three-second waiter or new `LocalVideoSurfaceRelease` thread.
+3. In the opposite ordering, let native cleanup finish before surface destruction. Destroy
+   the surface and verify its immediate one-time release through the same atomic handoff.
+   Inspect Logcat for BufferQueue/EGL errors and retain the first failure before retrying.
+
+Finish with a fresh, unmodified production observation. Remove debugger breakpoints,
+confirm normal motion/control/release/resume, and collect the canonical Host cleanup and
+receiver evidence. These fault-injection rows do not establish measured FPS, latency,
+physical scanout or Human acceptance.
+
+## Android call camera (#3498) — pending execution
+
+Run this in the assigned Windows/physical-Android batch with a rebuilt Debug APK and the
+isolated QA Host, never by taking the shared phone outside its queue. The JVM test covers the
+pure thumbnail, scaling and NV21 math; it does not prove CameraX capture or preview.
+
+1. Connect a Bot call, tap `call-camera`, grant the camera permission when asked, and confirm
+   the call stays up and the 3:4 self-preview appears. The permission dialog must not end the
+   call as a background event.
+2. Show a printed page or a QR-sized label, wait for the keyframe counter to rise, and ask the
+   Bot what it sees with the latest DeepSeek model. Confirm the Host receives `frame` commands
+   and the DM carries the expected grid.
+3. Tap `call-camera-flip`; confirm the preview switches camera and require a new keyframe from the
+   other side in the Host facts or keyframe counter. A preview-only change is not a pass. Front
+   preview is mirrored; text in the frame sent to the Bot is not.
+4. Use a `.dev` build and open `deepseekbot-dev://call/<bot>?script=<url>` with a timeline that
+   contains `{"at": 0, "video": "<url>"}`, then `{"at": 3000, "camera": "flip"}` and
+   `{"at": 6000, "camera": "off"}`. Require the report's `camera` mark with
+   `position: "back"` and `test: false` after the flip, then a later `keyframe` mark, before the
+   off transition. Earlier `video` or `keyframe` marks do not prove the flip. On an emulator
+   without a rear camera, record the flip row as **blocked**, not passed. Record JPEG byte sizes
+   and preparation times for the keyframes that do arrive.
+5. With the camera on, press Home, wait 10 seconds and return. The call stays up (ADR-0305) and
+   the DM shows the `share-paused` and `share-resumed` records; the keyframe counter rises again
+   after the return.
+6. Capture light and dark call screens with the camera on and off. Crop unrelated conversations
+   from published evidence.
+
+## Android background calls (#3423) and the bubble over other apps (#3469) — pending execution
+
+Rebuild the Debug APK first: the foreground service, its permissions, the overlay window and
+the notification icons are native inputs. Run it in the Windows/physical-Android batch with
+the isolated QA Host and the latest DeepSeek model. `adb logcat -s BotHarnessCall` shows the
+service phases (`started`, `stopped`, `start-failed`, `overlay-failed`).
+
+1. Start a call and allow notifications when asked (Android 13+). The shade shows one ongoing
+   call notification: Bot name, status, a running call time, **Hang up** and **Mute**. It
+   cannot be swiped away. `adb shell dumpsys activity services CallService` lists it with
+   types `microphone|mediaPlayback`.
+2. Turn the screen off for 60 seconds while a `.dev` script injects a question; the reply plays
+   with the screen off and the call is still live afterwards. Repeat after
+   `adb shell dumpsys deviceidle force-idle` (then `unforce`).
+3. Open another app and speak; the Bot hears and answers. Back in the app the call screen or the
+   in-app bubble shows the same call; the Host has no `ended` event.
+4. From the notification: **Mute** toggles the call screen's mute and the label; tapping the
+   notification body opens the call screen of the same call; **Hang up** ends the call, removes
+   the notification, and the Host records `hangup`.
+5. Interruptions: start music in another app (call mode) or receive a phone call. The call shows
+   **Paused** on the notification, bubble and call screen, the Host receives no speech, and the
+   Bot is not heard; when the music stops, the phone call ends or you return to the app, it
+   resumes on its own.
+6. Audio modes: run the question-and-answer case in call mode and in media mode. Volume keys
+   control call volume and media volume respectively; a Bluetooth headset uses A2DP in media
+   mode. Record speaker echo.
+7. Refuse notifications: the call still runs in the background and the live call screen shows
+   `call-notifications-off` with **Open Settings**.
+8. Bubble over other apps: on a live call screen `call-overlay-off` offers **Turn on** and
+   **Not now**. **Not now** hides it for this call. **Turn on** opens the system page; allow
+   it, return, and the prompt is gone. Press Home: the bubble floats over the launcher and other
+   apps with the Bot initial, ring, call time and muted badge; drag it and let go, and it snaps
+   to the nearer side inside the bars. Tapping it opens the same call without dialing again.
+   Back in the app only the in-app bubble shows, never both. Permission dialogs (camera,
+   notifications) do not bring up the bubble. Hang up from the notification removes it.
+9. Without the overlay permission the app in the background shows only the notification and
+   the call continues.
+10. Release (R8) build: one call connects, survives screen-off and shows the notification.
+11. Capture light and dark: the notification (shade and lock screen), the bubble over the
+    launcher, both call-screen prompts, at default, medium and largest text. Crop unrelated
+    notifications and apps.

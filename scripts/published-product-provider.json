@@ -1,0 +1,12 @@
+{
+  "name": "@botharness/im-provider",
+  "version": "4.32.0-botharness.27",
+  "filename": "botharness-im-provider-4.32.0-botharness.27.tgz",
+  "integrity": "sha512-D2vXSLEvUmGRdVBuhZXtktZC0MMowyCo7nvhM/xMpeGS5VqQ63h8B0l6G4OrbY0DVeKUGKFMRm7+T4U+L6j0DQ==",
+  "distTag": "latest",
+  "providerSource": "bb0c7956896f5f5845950a0707837cd7938a11b3",
+  "productSource": "8f3181a064a7c208480db2ab70795af291a04eef",
+  "runtimeFiles": 426,
+  "runtimeSha256": "0270de6803f944e501561ee383ded12e0becbf2b4c8143f05bade41c61c02625",
+  "qualification": "https://github.com/BotHarness/DeepSeekBot/actions/runs/43110829930"
+}

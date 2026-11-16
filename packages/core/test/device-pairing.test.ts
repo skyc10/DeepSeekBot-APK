@@ -1,0 +1,543 @@
+import { describe, expect, it } from 'vitest';
+
+import { attachOperationalModule, mountOperationalDatabase } from '../src/database/owner.js';
+import { BOT_HARNESS_SCHEMA_PLAN } from '../src/database/schema-plan.js';
+import {
+  createDevicePairing,
+  PAIRING_OFFER_TTL_MS,
+  type DevicePairingEvent,
+} from '../src/devices/pairing.js';
+import { createDevicesHttp, offeredRoutes, type PairingOfferView } from '../src/devices/http.js';
+import type { AccountResult, ConnectedHostsResult } from '../src/devices/connect-account.js';
+import { detectPhoneRoutes, type RunCommand } from '../src/devices/routes.js';
+import { createTempRoot, trackTestOwner } from './helpers.js';
+
+function fixture() {
+  const home = createTempRoot('botharness-device-pairing-');
+  let clock = Date.parse('2026-10-14T08:00:00.000Z');
+  const events: DevicePairingEvent[] = [];
+  const open = (onRevoked?: (deviceId: string) => void) => {
+    const owner = trackTestOwner(
+      mountOperationalDatabase({ dshHome: home, schemaPlan: BOT_HARNESS_SCHEMA_PLAN }),
+    );
+    return {
+      owner,
+      pairing: createDevicePairing({
+        database: attachOperationalModule(owner, 'device-pairing'),
+        hostName: 'studio',
+        now: () => clock,
+        record: (event) => events.push(event),
+        ...(onRevoked ? { onRevoked } : {}),
+      }),
+    };
+  };
+  return {
+    open,
+    events,
+    advance: (ms: number) => {
+      clock += ms;
+    },
+  };
+}
+
+describe('Device Pairing', () => {
+  it('runs the same bounded Connect health owner from HTTP and snapshots without accepting a caller target', async () => {
+    const host = fixture().open();
+    let checks = 0;
+    const observed = {
+      state: 'failed' as const,
+      stage: 'public' as const,
+      code: 'dns' as const,
+      checkedAt: '2026-11-14T00:00:00.000Z',
+      elapsedMs: 10,
+    };
+    const common = {
+      pairing: host.pairing,
+      routes: () => detectPhoneRoutes({ port: 4100, run: async () => '' }),
+    };
+    const missing = createDevicesHttp(common);
+    const request = () =>
+      new Request('http://h/api/botharness/devices/connect-health', {
+        method: 'POST',
+        body: JSON.stringify({ origin: 'https://attacker.invalid' }),
+      });
+    expect((await missing(request())).status).toBe(409);
+    const http = createDevicesHttp({
+      ...common,
+      connectHealth: {
+        status: () => observed,
+        check: async () => {
+          checks++;
+          return observed;
+        },
+      },
+    });
+    const snapshot = await (await http(new Request('http://h/api/botharness/devices'))).json();
+    expect(snapshot.connect.health).toEqual(observed);
+    expect(checks).toBe(0);
+    const response = await http(request());
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(await response.json()).toEqual({ health: observed });
+    expect(checks).toBe(1);
+    host.owner.close();
+  });
+
+  it('persists only an explicit device Feed acknowledgement and keeps revocation authoritative', () => {
+    const test = fixture();
+    const first = test.open();
+    const result = first.pairing.redeem({ offer: first.pairing.createOffer().offer });
+    if (!result.ok) throw new Error(result.code);
+    expect(first.pairing.check(result.device.id)).toMatchObject({ ok: true });
+    expect(first.pairing.list()[0]?.feedReadAt).toBeUndefined();
+    const receipt = first.pairing.acknowledgeFeed(result.device.id);
+    expect(receipt).toMatchObject({ ok: true, device: { feedReadAt: '2026-10-14T08:00:00.000Z' } });
+    test.advance(1000);
+    expect(first.pairing.acknowledgeFeed(result.device.id)).toEqual(receipt);
+    first.owner.close();
+    const reopened = test.open();
+    expect(reopened.pairing.list()[0]?.feedReadAt).toBe('2026-10-14T08:00:00.000Z');
+    reopened.pairing.revoke(result.device.id);
+    expect(reopened.pairing.acknowledgeFeed(result.device.id)).toEqual({
+      ok: false,
+      code: 'device-revoked',
+    });
+    expect(reopened.pairing.acknowledgeFeed('unknown')).toEqual({
+      ok: false,
+      code: 'device-unknown',
+    });
+  });
+
+  it('exposes account-host management only on demand and requires confirmation before owner calls', async () => {
+    const host = fixture().open();
+    let listCalls = 0;
+    const revokes: string[] = [];
+    const state = { state: 'signed-in' as const };
+    const http = createDevicesHttp({
+      pairing: host.pairing,
+      routes: () => detectPhoneRoutes({ port: 4100, run: async () => '' }),
+      account: {
+        status: () => state,
+        signIn: async () => ({ ok: true, status: state }),
+        signOut: async () => ({ ok: true, status: state }),
+        connectedHosts: async (): Promise<ConnectedHostsResult> => {
+          listCalls += 1;
+          return {
+            ok: true,
+            hosts: [
+              {
+                id: 'hother',
+                name: 'Other',
+                hostname: 'other.test',
+                createdAt: '2026-01-01T00:00:00Z',
+                current: false,
+                sessionKnown: true,
+              },
+            ],
+          };
+        },
+        revokeConnectedHost: async (hostId): Promise<AccountResult> => {
+          revokes.push(hostId);
+          return { ok: false, code: 'current-host' };
+        },
+      },
+    });
+    await http(new Request('http://h/api/botharness/devices'));
+    expect(listCalls).toBe(0);
+    const list = await (
+      await http(new Request('http://h/api/botharness/devices/account-hosts'))
+    ).json();
+    expect(list).toMatchObject({ hosts: [{ id: 'hother', current: false, sessionKnown: true }] });
+    expect(listCalls).toBe(1);
+    const revoke = (body: unknown) =>
+      http(
+        new Request('http://h/api/botharness/devices/account-hosts/revoke', {
+          method: 'POST',
+          body: JSON.stringify(body),
+        }),
+      );
+    expect((await revoke({ hostId: 'hother' })).status).toBe(400);
+    expect((await revoke({ confirm: true })).status).toBe(400);
+    expect(revokes).toHaveLength(0);
+    expect(
+      await (
+        await revoke({ hostId: 'hother', confirm: true, token: 'ignored-client-token' })
+      ).json(),
+    ).toEqual({ code: 'current-host' });
+    expect(revokes).toEqual(['hother']);
+    host.owner.close();
+  });
+
+  it.each([
+    { state: 'signed-in' as const },
+    {
+      state: 'error' as const,
+      issue: 'relay-unavailable' as const,
+      recovery: 'automatic' as const,
+    },
+    { state: 'signing-in' as const },
+  ])(
+    'keeps a %o Host on its account tunnel instead of a disable the account would undo',
+    async (state) => {
+      const host = fixture().open();
+      let disabled = 0;
+      const http = createDevicesHttp({
+        pairing: host.pairing,
+        routes: () => detectPhoneRoutes({ port: 4100, run: async () => '' }),
+        connect: {
+          status: () => ({ state: 'connected' }),
+          route: () => undefined,
+          start: async () => {},
+          enable: async () => ({ ok: true, status: { state: 'connected' } }),
+          disable: async () => {
+            disabled += 1;
+            return { ok: true, status: { state: 'off' } };
+          },
+          close: async () => {},
+        },
+        account: {
+          status: () => state,
+          signIn: async () => ({ ok: true, status: state }),
+          signOut: async () => ({ ok: true, status: state }),
+          connectedHosts: async (): Promise<ConnectedHostsResult> => ({ ok: true, hosts: [] }),
+          revokeConnectedHost: async (): Promise<AccountResult> => ({ ok: true, status: state }),
+        },
+      });
+      const response = await http(
+        new Request('http://h/api/botharness/devices/connect', {
+          method: 'POST',
+          body: JSON.stringify({ action: 'disable' }),
+        }),
+      );
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({
+        code: 'connect-signed-in',
+        error: expect.stringContaining('connect-sign-out'),
+      });
+      expect(disabled).toBe(0);
+      host.owner.close();
+    },
+  );
+
+  it('returns a coded signed-out refusal for account management without an owner', async () => {
+    const host = fixture().open();
+    const http = createDevicesHttp({
+      pairing: host.pairing,
+      routes: () => detectPhoneRoutes({ port: 4100, run: async () => '' }),
+    });
+    expect(
+      await (await http(new Request('http://h/api/botharness/devices/account-hosts'))).json(),
+    ).toEqual({ code: 'signed-out' });
+    host.owner.close();
+  });
+  it('requires approval of the exact Noise device key and keeps that binding across restart', () => {
+    const f = fixture();
+    let host = f.open();
+    const offer = host.pairing.createOffer();
+    const publicKey = '11'.repeat(32);
+    const otherKey = '22'.repeat(32);
+    expect(host.pairing.requestKey({ offer: offer.offer, publicKey, name: 'Phone' })).toMatchObject(
+      { ok: true },
+    );
+    expect(host.pairing.redeem({ offer: offer.offer, publicKey })).toEqual({
+      ok: false,
+      code: 'device-approval-required',
+    });
+    expect(host.pairing.approveKey(offer.receipt, otherKey)).toBe(false);
+    expect(host.pairing.approveKey(offer.receipt, publicKey)).toBe(true);
+    const paired = host.pairing.redeem({ offer: offer.offer, publicKey });
+    if (!paired.ok) throw new Error('pairing failed');
+    host.owner.close();
+    host = f.open();
+    expect(host.pairing.admitKey(`Device ${paired.credential}`, publicKey).ok).toBe(true);
+    expect(host.pairing.admitKey(`Device ${paired.credential}`, otherKey)).toMatchObject({
+      ok: false,
+    });
+    expect(host.pairing.list()[0]?.publicKey).toBe(publicKey);
+  });
+
+  it('redeems an offer once, admits the device across a Host restart, and refuses it after revocation', () => {
+    const f = fixture();
+    let host = f.open();
+    const identity = host.pairing.host();
+    const { offer } = host.pairing.createOffer();
+    const paired = host.pairing.redeem({ offer, name: '  Vain\u0007 iPhone ' });
+    expect(paired).toMatchObject({ ok: true, device: { name: 'Vain iPhone' }, host: identity });
+    if (!paired.ok) return;
+    expect(host.pairing.redeem({ offer })).toEqual({ ok: false, code: 'offer-invalid' });
+
+    host.owner.close();
+    host = f.open();
+    expect(host.pairing.host()).toEqual(identity);
+    const admitted = host.pairing.admit(`Device ${paired.credential}`);
+    expect(admitted).toMatchObject({ ok: true, device: { id: paired.device.id } });
+    expect(host.pairing.list()).toEqual([
+      expect.objectContaining({ id: paired.device.id, lastSeenAt: '2026-10-14T08:00:00.000Z' }),
+    ]);
+
+    let closed = 0;
+    host.pairing.attachStream(paired.device.id, () => (closed += 1));
+    host.pairing.attachStream(paired.device.id, () => (closed += 1));
+    expect(host.pairing.revoke(paired.device.id)).toEqual({ revoked: true, closedStreams: 2 });
+    expect(closed).toBe(2);
+    expect(host.pairing.admit(`Device ${paired.credential}`)).toEqual({
+      ok: false,
+      code: 'device-revoked',
+    });
+    expect(host.pairing.list()[0]?.revokedAt).toBeDefined();
+    expect(host.pairing.revoke(paired.device.id)).toEqual({ revoked: false, closedStreams: 0 });
+  });
+
+  it('tears down a known already-revoked device without a stream', () => {
+    const notified: string[] = [];
+    const host = fixture().open((id) => notified.push(id));
+    const paired = host.pairing.redeem({ offer: host.pairing.createOffer().offer });
+    if (!paired.ok) throw new Error('pairing failed');
+    attachOperationalModule(host.owner, 'device-pairing').transaction((db) =>
+      db
+        .prepare('UPDATE paired_devices SET revoked_at = paired_at WHERE device_id = ?')
+        .run(paired.device.id),
+    );
+    expect(host.pairing.list()).toMatchObject([
+      { id: paired.device.id, revokedAt: expect.any(String) },
+    ]);
+    expect(host.pairing.revoke(paired.device.id)).toEqual({ revoked: false, closedStreams: 0 });
+    expect(notified).toEqual([paired.device.id]);
+  });
+
+  it('tears down an owned stream after its canonical device row has been purged', () => {
+    const notified: string[] = [];
+    const host = fixture().open((id) => notified.push(id));
+    const paired = host.pairing.redeem({ offer: host.pairing.createOffer().offer });
+    if (!paired.ok) throw new Error('pairing failed');
+    let closed = 0;
+    host.pairing.attachStream(paired.device.id, () => {
+      closed++;
+    });
+    attachOperationalModule(host.owner, 'device-pairing').transaction((db) =>
+      db.prepare('DELETE FROM paired_devices WHERE device_id = ?').run(paired.device.id),
+    );
+    expect(host.pairing.revoke(paired.device.id)).toEqual({ revoked: true, closedStreams: 1 });
+    expect(closed).toBe(1);
+    expect(notified).toEqual([paired.device.id]);
+    expect(host.pairing.revoke(paired.device.id)).toEqual({ revoked: false, closedStreams: 0 });
+    expect(host.pairing.revoke('unknown')).toEqual({ revoked: false, closedStreams: 0 });
+    expect(notified).toEqual([paired.device.id]);
+  });
+
+  it('tells a missing, unknown and forged credential apart from a revoked one', () => {
+    const host = fixture().open();
+    const paired = host.pairing.redeem({ offer: host.pairing.createOffer().offer });
+    if (!paired.ok) throw new Error('pairing failed');
+    const [id, secret] = paired.credential.split('.') as [string, string];
+    expect(host.pairing.admit(undefined)).toEqual({ ok: false, code: 'device-credential-missing' });
+    expect(host.pairing.admit(`Bearer ${paired.credential}`)).toEqual({
+      ok: false,
+      code: 'device-credential-missing',
+    });
+    const forged = `${secret.slice(0, -1)}${secret.endsWith('A') ? 'B' : 'A'}`;
+    expect(host.pairing.admit(`Device ${id}.${forged}`)).toEqual({
+      ok: false,
+      code: 'device-unknown',
+    });
+    expect(host.pairing.admit(`Device ${'x'.repeat(22)}.${secret}`)).toEqual({
+      ok: false,
+      code: 'device-unknown',
+    });
+  });
+
+  it('expires an offer and voids unredeemed offers on restart', () => {
+    const f = fixture();
+    let host = f.open();
+    const late = host.pairing.createOffer();
+    f.advance(PAIRING_OFFER_TTL_MS);
+    expect(host.pairing.redeem({ offer: late.offer })).toEqual({
+      ok: false,
+      code: 'offer-expired',
+    });
+    const pending = host.pairing.createOffer();
+    host.owner.close();
+    host = f.open();
+    expect(host.pairing.redeem({ offer: pending.offer })).toEqual({
+      ok: false,
+      code: 'offer-invalid',
+    });
+  });
+
+  it('reports what became of an offer by its receipt without the offer itself', () => {
+    const f = fixture();
+    let host = f.open();
+    const redeemed = host.pairing.createOffer();
+    expect(redeemed.receipt).not.toBe(redeemed.offer);
+    expect(host.pairing.offerStatus(redeemed.receipt)).toEqual({
+      receipt: redeemed.receipt,
+      state: 'pending',
+      expiresAt: redeemed.expiresAt,
+    });
+    const paired = host.pairing.redeem({ offer: redeemed.offer });
+    if (!paired.ok) throw new Error('pairing failed');
+    expect(host.pairing.offerStatus(redeemed.receipt)).toMatchObject({
+      state: 'redeemed',
+      deviceId: paired.device.id,
+    });
+
+    const lapsed = host.pairing.createOffer();
+    f.advance(PAIRING_OFFER_TTL_MS);
+    expect(host.pairing.offerStatus(lapsed.receipt)).toMatchObject({ state: 'expired' });
+    expect(JSON.stringify(host.pairing.offerStatus(lapsed.receipt))).not.toContain(lapsed.offer);
+
+    const first = host.pairing.createOffer();
+    for (let index = 0; index < 16; index += 1) host.pairing.createOffer();
+    expect(host.pairing.offerStatus(first.receipt)).toMatchObject({ state: 'superseded' });
+
+    const pending = host.pairing.createOffer();
+    host.owner.close();
+    host = f.open();
+    expect(host.pairing.offerStatus(pending.receipt)).toEqual({
+      receipt: pending.receipt,
+      state: 'unknown',
+    });
+  });
+
+  it('records diagnostics without offers or credentials', () => {
+    const f = fixture();
+    const host = f.open();
+    const { offer } = host.pairing.createOffer();
+    const paired = host.pairing.redeem({ offer });
+    if (!paired.ok) throw new Error('pairing failed');
+    host.pairing.admit(`Device ${paired.credential}`);
+    host.pairing.revoke(paired.device.id);
+    host.pairing.admit(`Device ${paired.credential}`);
+    const text = JSON.stringify(f.events);
+    expect(f.events.map((event) => event.phase)).toEqual([
+      'offer-created',
+      'offer-redeemed',
+      'device-admitted',
+      'device-revoked',
+      'device-refused',
+    ]);
+    expect(text).not.toContain(offer);
+    expect(text).not.toContain(paired.credential.split('.')[1]);
+  });
+});
+
+describe('paired devices management', () => {
+  const tailnet: RunCommand = async (_file, args) =>
+    args[0] === 'status'
+      ? JSON.stringify({ BackendState: 'Running', Self: { DNSName: 'studio.tail1.ts.net.' } })
+      : JSON.stringify({
+          Web: {
+            'studio.tail1.ts.net:443': { Handlers: { '/': { Proxy: 'http://127.0.0.1:4100' } } },
+          },
+        });
+
+  it('offers the served Tailscale route first and a QR code carrying a one-time offer', async () => {
+    const host = fixture().open();
+    const http = createDevicesHttp({
+      pairing: host.pairing,
+      routes: () => detectPhoneRoutes({ port: 4100, run: tailnet }),
+    });
+    const response = await http(
+      new Request('http://127.0.0.1:4100/api/botharness/devices/offer', {
+        method: 'POST',
+        body: JSON.stringify({ origin: 'http://127.0.0.1:4100' }),
+      }),
+    );
+    const view = (await response.json()) as PairingOfferView;
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(view.reachable).toBe(true);
+    expect(view.routes).toEqual(['https://studio.tail1.ts.net', 'http://127.0.0.1:4100']);
+    expect(view.qr.size).toBeGreaterThan(20);
+    const url = new URL(view.link);
+    expect(url.protocol).toBe('deepseekbot:');
+    const payload = JSON.parse(Buffer.from(url.searchParams.get('p')!, 'base64url').toString()) as {
+      offer: string;
+      host: { id: string };
+      routes: string[];
+    };
+    expect(payload.routes).toEqual(view.routes);
+    expect(payload.host).toEqual(host.pairing.host());
+    expect(host.pairing.redeem({ offer: payload.offer }).ok).toBe(true);
+  });
+
+  it('warns when tailscale serve does not publish this Host', async () => {
+    const unserved: RunCommand = async (_file, args) =>
+      args[0] === 'status'
+        ? JSON.stringify({ BackendState: 'Running', Self: { DNSName: 'studio.tail1.ts.net.' } })
+        : '{}';
+    const status = await detectPhoneRoutes({ port: 4100, run: unserved });
+    expect(status.routes[0]).toMatchObject({ ready: false, issue: 'serve-missing' });
+    expect(status.serveCommand).toBe('tailscale serve --bg 4100');
+    expect(offeredRoutes(status, undefined).map((route) => route.url)).toEqual([
+      'http://127.0.0.1:4100',
+    ]);
+
+    expect(offeredRoutes(status, 'https://studio.tail1.ts.net').map((route) => route.url)).toEqual([
+      'https://studio.tail1.ts.net',
+      'http://127.0.0.1:4100',
+    ]);
+    const missing: RunCommand = () =>
+      Promise.reject(Object.assign(new Error('missing'), { code: 'ENOENT' }));
+    expect(await detectPhoneRoutes({ port: 4100, run: missing })).toMatchObject({
+      tailscale: 'missing',
+    });
+  });
+
+  it('lists devices and revokes one', async () => {
+    const host = fixture().open();
+    const http = createDevicesHttp({
+      pairing: host.pairing,
+      routes: () => detectPhoneRoutes({ port: 4100, run: tailnet }),
+    });
+    const paired = host.pairing.redeem({ offer: host.pairing.createOffer().offer, name: 'Pixel' });
+    if (!paired.ok) throw new Error('pairing failed');
+    const list = await (await http(new Request('http://h/api/botharness/devices'))).json();
+    expect(list).toMatchObject({ devices: [{ id: paired.device.id, name: 'Pixel' }] });
+    expect(JSON.stringify(list)).not.toContain(paired.credential);
+    const revoke = (deviceId: string) =>
+      http(
+        new Request('http://h/api/botharness/devices/revoke', {
+          method: 'POST',
+          body: JSON.stringify({ deviceId }),
+        }),
+      );
+    const revoked = await revoke(paired.device.id);
+    expect([revoked.status, await revoked.json()]).toEqual([
+      200,
+      { revoked: true, closedStreams: 0, device: { id: paired.device.id, name: 'Pixel' } },
+    ]);
+    const again = await revoke(paired.device.id);
+    expect([again.status, await again.json()]).toMatchObject([
+      409,
+      { code: 'device-already-revoked', device: { id: paired.device.id } },
+    ]);
+    expect((await revoke('nope')).status).toBe(404);
+  });
+
+  it('answers offer status by receipt and never returns the pairing link', async () => {
+    const host = fixture().open();
+    const http = createDevicesHttp({
+      pairing: host.pairing,
+      routes: () => detectPhoneRoutes({ port: 4100, run: tailnet }),
+    });
+    const view = (await (
+      await http(new Request('http://h/api/botharness/devices/offer', { method: 'POST' }))
+    ).json()) as PairingOfferView;
+    const status = (receipt: unknown) =>
+      http(
+        new Request('http://h/api/botharness/devices/offer-status', {
+          method: 'POST',
+          body: JSON.stringify({ receipt }),
+        }),
+      );
+    const pending = await status(view.receipt);
+    const text = await pending.text();
+    expect(JSON.parse(text)).toMatchObject({ receipt: view.receipt, state: 'pending' });
+    expect(text).not.toContain(view.link);
+    expect(text).not.toContain(new URL(view.link).searchParams.get('p'));
+    expect(await (await status('missing')).json()).toEqual({
+      receipt: 'missing',
+      state: 'unknown',
+    });
+    expect((await status(undefined)).status).toBe(400);
+  });
+});

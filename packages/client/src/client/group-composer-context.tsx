@@ -1,0 +1,386 @@
+import { memberPage } from './member-page.js';
+import { hasChannelBots } from './channel-kind.js';
+import { useScopedState } from './scoped-state.js';
+import { useRef, useState, type Ref, type ReactElement } from 'react';
+import { Button, Tag } from '@deepseek-ai/dsh-client-ui-primitives';
+import type { BridgeActions } from './actions.js';
+import type { AssignmentAccessPresetView, WorkspaceGrantView, WorkspaceOption } from './bridge.js';
+import { errorMessage } from './bridge.js';
+import type { BotSummary, ChannelSummary } from './store.js';
+import type { BotHarnessTranslate } from './locale.js';
+import type { ComposerContext } from './composer-shortcuts.js';
+import { ChannelSidebarIcon } from './channel-sidebar-icon.js';
+import { Note } from './ds/note.js';
+import { PanelDialog } from './ds/panel-dialog.js';
+import { SidebarCardList, SidebarCardRow } from './sidebar-card.js';
+import { useMountedResource } from './mounted-resource.js';
+import {
+  WorkspaceFolderPicker,
+  FolderRow,
+  FolderSectionSummary,
+  withWorkspaceActionDeadline,
+} from './workspace-grants-entry.js';
+import { subscribeWorkspaceGrantChanges } from './workspace-grant-events.js';
+import { authorizeGroupMembers, type GroupGrantResult } from './group-workspace-authorization.js';
+import { ComposerContextBar, type ComposerFooterHandle } from './composer-context-bar.js';
+import { ChipButton } from './ds/chip-button.js';
+import type { AveragePerfView } from './message-perf.js';
+
+interface PreviewMember {
+  slug: string;
+  name: string;
+  grant: WorkspaceGrantView | undefined;
+  access: AssignmentAccessPresetView;
+}
+
+export function useGroupComposerContext({
+  scopeKey,
+  channel,
+  members,
+  actions,
+  t,
+  avgPerf,
+}: {
+  scopeKey?: string | undefined;
+  channel: ChannelSummary | undefined;
+  members: BotSummary[];
+  actions: BridgeActions;
+  t: BotHarnessTranslate;
+  avgPerf?: AveragePerfView | undefined;
+}): ComposerContext | undefined {
+  const footerSettings = useRef<ComposerFooterHandle>(null);
+  const [openChannel, setOpenChannel] = useScopedState<string>(scopeKey ?? channel?.id);
+  if (channel?.type !== 'group' || !hasChannelBots(channel) || memberPage()) return;
+  const open = () => setOpenChannel(channel.id);
+  return {
+    target: channel.id,
+    shortcuts: [
+      {
+        id: 'workspace',
+        label: t('grant.addFolder'),
+        icon: <ChannelSidebarIcon name="folder-key" />,
+        run: open,
+      },
+      { id: 'footer', label: t('footer.settings'), run: () => footerSettings.current?.open() },
+    ],
+    content: (
+      <GroupComposerContextView
+        key={scopeKey ?? channel.id}
+        footerSettings={footerSettings}
+        channelId={channel.id}
+        members={members.filter((bot) => !bot.deleted && !bot.paused)}
+        actions={actions}
+        t={t}
+        open={openChannel === channel.id}
+        onOpen={open}
+        avgPerf={avgPerf}
+        onClose={() => setOpenChannel(undefined)}
+      />
+    ),
+  };
+}
+
+export function GroupComposerContextView({
+  footerSettings,
+  channelId,
+  members,
+  actions,
+  t,
+  open,
+  onOpen,
+  avgPerf,
+  onClose,
+}: {
+  footerSettings?: Ref<ComposerFooterHandle>;
+  channelId: string;
+  members: BotSummary[];
+  actions: BridgeActions;
+  t: BotHarnessTranslate;
+  open: boolean;
+  onOpen(): void;
+  avgPerf?: AveragePerfView | undefined;
+  onClose(): void;
+}): ReactElement {
+  const [selected, setSelected] = useState<string[]>();
+  const [facts, setFacts] = useState<Record<string, WorkspaceGrantView[] | null | undefined>>({});
+  const [workspaces, setWorkspaces] = useState<WorkspaceOption[]>([]);
+  const [preview, setPreview] = useState<{
+    path: string;
+    title: string;
+    members: PreviewMember[];
+  }>();
+  const [results, setResults] = useState<GroupGrantResult[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+  const current = useRef(0);
+  const factRequest = useRef(0);
+  const eligible = (selected ?? members.map((bot) => bot.slug)).filter((slug) =>
+    members.some((bot) => bot.slug === slug),
+  );
+  const signature = members.map((bot) => bot.slug).join('|');
+  const mount = useMountedResource<HTMLDivElement>(() => {
+    current.current += 1;
+    return () => {
+      current.current += 1;
+    };
+  }, []);
+  const factMount = useMountedResource<HTMLButtonElement>(() => {
+    const generation = ++factRequest.current;
+    const refresh = (slug: string): void => {
+      void actions.listWorkspaceGrants(slug).then(
+        (rows) => {
+          if (factRequest.current === generation)
+            setFacts((value) => ({
+              ...value,
+              [slug]: rows.filter((grant) => grant.revokedAt === undefined),
+            }));
+        },
+        () => {
+          if (factRequest.current === generation) setFacts((value) => ({ ...value, [slug]: null }));
+        },
+      );
+    };
+    const slugs = members.map((bot) => bot.slug);
+    for (const slug of slugs) refresh(slug);
+    if (slugs.length > 0)
+      void actions.listWorkspaceOptions().then(
+        (rows) => {
+          if (factRequest.current === generation) setWorkspaces(rows);
+        },
+        () => {},
+      );
+    const disposers = slugs.map((slug) =>
+      subscribeWorkspaceGrantChanges(slug, () => refresh(slug), actions),
+    );
+    return () => {
+      factRequest.current += 1;
+      disposers.forEach((dispose) => dispose());
+    };
+  }, [actions, signature]);
+  const choose = (path: string): void => {
+    if (busy || eligible.length === 0) return;
+    const generation = current.current;
+    setBusy(true);
+    setError(undefined);
+    setPreview(undefined);
+    setResults([]);
+    void withWorkspaceActionDeadline(
+      (async () => {
+        const resolved = await actions.resolveWorkspaceFolder(path);
+        const targets = await Promise.all(
+          eligible.map(async (slug): Promise<PreviewMember> => ({
+            slug,
+            name: members.find((bot) => bot.slug === slug)!.displayName,
+            grant: await actions.readGroupWorkspaceGrant(channelId, slug, resolved.path),
+            access: await actions.assignmentAccess(slug),
+          })),
+        );
+        if (current.current === generation)
+          setPreview({ path: resolved.path, title: resolved.title, members: targets });
+      })(),
+      t('grant.loadTimeout'),
+    )
+      .catch((cause: unknown) => {
+        if (current.current === generation) setError(errorMessage(cause));
+      })
+      .finally(() => {
+        if (current.current === generation) setBusy(false);
+      });
+  };
+  const submit = (): void => {
+    if (busy || preview === undefined) return;
+    const generation = current.current;
+    setBusy(true);
+    setError(undefined);
+    void authorizeGroupMembers({
+      actions,
+      channelId,
+      path: preview.path,
+      slugs: preview.members.map((bot) => bot.slug),
+      previous: results,
+      deadline: (operation) => withWorkspaceActionDeadline(operation, t('grant.operationTimeout')),
+      onResult: (result) => {
+        if (current.current === generation)
+          setResults((rows) => [...rows.filter((row) => row.slug !== result.slug), result]);
+      },
+    }).finally(() => {
+      if (current.current === generation) setBusy(false);
+    });
+  };
+  const chip = groupWorkspaceChip(
+    members.map((bot) => facts[bot.slug]),
+    t,
+  );
+  const retry = results.some((row) => row.status === 'unknown' || row.status === 'failed');
+  return (
+    <>
+      <div ref={mount} hidden />
+      <ComposerContextBar
+        settingsRef={footerSettings}
+        available={['workspace', 'avg-perf']}
+        t={t}
+        label={t('composerContext.label')}
+      >
+        <ChipButton
+          ref={factMount}
+          data-composer-chip="workspace"
+          collapseLabel
+          icon={<ChannelSidebarIcon name="folder-key" size={14} />}
+          label={chip}
+          aria-label={`${t('entry.workspaceGrants')} · ${chip}`}
+          onClick={onOpen}
+        />
+        {avgPerf === undefined ? null : (
+          <ChipButton
+            data-composer-chip="avg-perf"
+            icon={<ChannelSidebarIcon name="gauge" size={14} />}
+            label={t('message.perf.speed', { tps: avgPerf.tokensPerSecond })}
+            title={t('composerContext.avgPerf.title', { count: avgPerf.count })}
+            tabIndex={-1}
+            disabled
+          />
+        )}
+      </ComposerContextBar>
+      {open ? (
+        <PanelDialog
+          size="medium"
+          fill
+          title={t('entry.workspaceGrants')}
+          closeLabel={t('approval.cancel')}
+          onClose={() => {
+            if (!busy) onClose();
+          }}
+          data={{ 'data-group-grant': '' }}
+        >
+          {preview === undefined ? (
+            <fieldset className="bh-group-grant-members" disabled={busy}>
+              <legend>{t('groupGrant.select')}</legend>
+              {members.map((bot) => (
+                <label key={bot.slug}>
+                  <input
+                    type="checkbox"
+                    checked={eligible.includes(bot.slug)}
+                    onChange={(event) => {
+                      setSelected(
+                        event.target.checked
+                          ? [...eligible, bot.slug]
+                          : eligible.filter((slug) => slug !== bot.slug),
+                      );
+                      setPreview(undefined);
+                      setResults([]);
+                      setError(undefined);
+                    }}
+                  />
+                  {bot.displayName}
+                </label>
+              ))}
+              {members.length === 0 ? <p>{t('groupGrant.noMembers')}</p> : null}
+            </fieldset>
+          ) : null}
+          {error === undefined ? null : <Note tone="danger">{error}</Note>}
+          {busy ? <Note>{t('grant.working')}</Note> : null}
+          {preview === undefined ? (
+            <WorkspaceFolderPicker
+              actions={actions}
+              t={t}
+              disabled={busy || eligible.length === 0}
+              workspaces={workspaces}
+              onChoose={choose}
+            />
+          ) : (
+            <div role="group" aria-label={t('groupGrant.confirm')}>
+              <SidebarCardList className="bh-workspace-folder-table bh-group-grant-results">
+                <FolderRow
+                  name={preview.title}
+                  path={preview.path}
+                  initiallyExpanded
+                  chips={
+                    <Tag tone="outline">
+                      {t('groupGrant.targets', { count: preview.members.length })}
+                    </Tag>
+                  }
+                  pathAction={
+                    <div className="bh-workspace-folder-path bh-group-grant-directory">
+                      {preview.path}
+                    </div>
+                  }
+                  detail={<p>{t('groupGrant.permissions')}</p>}
+                />
+                {preview.members.map((bot) => {
+                  const result = results.find((row) => row.slug === bot.slug);
+                  const status =
+                    result?.status ?? (bot.grant === undefined ? 'pending' : 'existing');
+                  return (
+                    <SidebarCardRow
+                      key={bot.slug}
+                      title={bot.name}
+                      state={status}
+                      chips={
+                        <>
+                          <Tag
+                            tone={
+                              ['created', 'existing', 'confirmed'].includes(status)
+                                ? 'success'
+                                : 'outline'
+                            }
+                          >
+                            <span role="status">{t(`groupGrant.${status}`)}</span>
+                          </Tag>
+                          <Tag tone="outline">
+                            {t(
+                              bot.grant?.orchestratorWrite ? 'grant.chip.write' : 'grant.chip.read',
+                            )}
+                          </Tag>
+                        </>
+                      }
+                      meta={t('groupGrant.taskAccess', { mode: bot.access.mode })}
+                      detail={
+                        result?.error === undefined ? undefined : (
+                          <div className="bh-error">{result.error}</div>
+                        )
+                      }
+                    />
+                  );
+                })}
+              </SidebarCardList>
+              <div className="bh-group-grant-actions">
+                {results.length === 0 || retry ? (
+                  <Button variant="outline" disabled={busy} onClick={submit}>
+                    {t(results.length === 0 ? 'grant.authorize' : 'groupGrant.retry')}
+                  </Button>
+                ) : null}
+                <Button
+                  variant="outline"
+                  disabled={busy}
+                  onClick={() => {
+                    setPreview(undefined);
+                    setResults([]);
+                  }}
+                >
+                  {t('approval.cancel')}
+                </Button>
+              </div>
+            </div>
+          )}
+          <details className="bh-group-grant-policy">
+            <FolderSectionSummary>{t('groupGrant.details')}</FolderSectionSummary>
+            <p>{t('groupGrant.unselected')}</p>
+            <p>{t('groupGrant.scope')}</p>
+            <p>{t('groupGrant.partial')}</p>
+          </details>
+        </PanelDialog>
+      ) : null}
+    </>
+  );
+}
+
+export function groupWorkspaceChip(
+  facts: (WorkspaceGrantView[] | null | undefined)[],
+  t: BotHarnessTranslate,
+): string {
+  if (facts.length === 0) return t('groupGrant.select');
+  if (facts.some((grants) => grants === null)) return t('composerContext.unavailable');
+  if (facts.some((grants) => grants === undefined)) return t('composerContext.loading');
+  const ids = new Set(facts.flatMap((grants) => grants!.map((grant) => grant.workspaceId)));
+  return t('composerContext.workspaces', { count: ids.size });
+}

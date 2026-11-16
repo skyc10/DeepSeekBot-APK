@@ -1,0 +1,385 @@
+import { OWNER_HUMAN_CONTEXT } from '../src/humans/context.js';
+import { describe, expect, it, vi } from 'vitest';
+import { createBridgeMethods } from '../src/bridge/methods.js';
+import { createCore } from '../src/plugin.js';
+import type {
+  AssignmentAgentRun,
+  BotAgentAdapter,
+  OrchestratorAssignmentAccess,
+} from '../src/runtime/bot-runtime.js';
+import { createTempRoot } from './helpers.js';
+import {
+  createTestNativeWorkspace,
+  createTestWorkspaceGrants,
+  TEST_GRANT_ID,
+} from './workspace-grant-fixture.js';
+
+function agents() {
+  const runs: AssignmentAgentRun[] = [];
+  const finishes = new Map<string, () => void>();
+  let access: OrchestratorAssignmentAccess | undefined;
+  const adapter: BotAgentAdapter = {
+    async runOrchestrator(run) {
+      access = run.assignments;
+    },
+    runAssignment(run) {
+      runs.push(run);
+      return new Promise<void>((resolve) => finishes.set(run.sessionId, resolve));
+    },
+    requestAssignment(run) {
+      runs.push(run);
+      return {
+        delivery: 'followup',
+        accepted: Promise.resolve(),
+        done: new Promise<void>((resolve) => finishes.set(run.sessionId, resolve)),
+      };
+    },
+    async stopAssignment(id) {
+      finishes.get(id)?.();
+    },
+    async close() {
+      for (const finish of finishes.values()) finish();
+    },
+  };
+  return { adapter, runs, access: () => access, finish: (id: string) => finishes.get(id)?.() };
+}
+
+async function fixture(options: { nativeRefusal?: Error; nativeGate?: Promise<void> } = {}) {
+  const home = createTempRoot('botharness-assignment-archive-');
+  const live = agents();
+  const archived = new Set<string>();
+  const nativeCalls: string[] = [];
+  const workspace = createTestNativeWorkspace(home);
+  const core = createCore({
+    dshHome: home,
+    agents: live.adapter,
+    sessionArchive: () => ({
+      async archiveSession(id) {
+        nativeCalls.push(`archive:${id}`);
+        if (options.nativeRefusal !== undefined) throw options.nativeRefusal;
+        await options.nativeGate;
+        archived.add(id);
+      },
+      async unarchiveSession(id) {
+        nativeCalls.push(`unarchive:${id}`);
+        archived.delete(id);
+      },
+    }),
+    workspaces: () => workspace.lookup,
+  });
+  core.registry.create({ slug: 'ada', displayName: 'Ada' });
+  createTestWorkspaceGrants(core.operationalDatabase, workspace.path);
+  const dm = core.channels.getOrCreateDm(OWNER_HUMAN_CONTEXT, 'ada', 'Ada');
+  if (dm === undefined) throw new Error('Missing DM');
+  const admission = core.runtime.admitDmMessage(OWNER_HUMAN_CONTEXT, {
+    channelId: dm.id,
+    messageId: 'human-start',
+    body: 'Start',
+  });
+  if (!admission.admitted) throw new Error('Not admitted');
+  await admission.settled;
+  const access = live.access();
+  if (access === undefined) throw new Error('Missing Orchestrator');
+  function create(description: string, key?: string, title = description) {
+    const created = access!.create({
+      grantId: TEST_GRANT_ID,
+      title,
+      description,
+      ...(key === undefined ? {} : { key }),
+    });
+    if (created.outcome !== 'created') throw new Error(`Not created: ${created.outcome}`);
+    return created.assignment.sessionId;
+  }
+  async function settle(sessionId: string) {
+    live.finish(sessionId);
+    await vi.waitFor(() =>
+      expect(core.runtime.getAssignment('ada', sessionId)?.activity).toBe('idle'),
+    );
+  }
+  async function close() {
+    await live.adapter.close();
+    await core.runtime.whenIdle();
+    await core.runtime.close();
+    core.operationalDatabase.close();
+  }
+  return { core, live, access, create, settle, close, archived, nativeCalls };
+}
+
+describe('Orchestrator Assignment archive', () => {
+  it('refuses a working Assignment, then archives it natively and hides it from the directory', async () => {
+    const f = await fixture();
+    try {
+      const id = f.create('Ship the release notes', 'release-notes');
+      await expect(f.access.archive!(id)).resolves.toMatchObject({
+        outcome: 'refused',
+        code: 'assignment-active',
+      });
+      expect(f.nativeCalls).toEqual([]);
+      expect(f.access.query!({}).assignments.map((a) => a.sessionId)).toEqual([id]);
+
+      await f.settle(id);
+      const archived = await f.access.archive!(id);
+      expect(archived).toMatchObject({ outcome: 'archived' });
+      expect(f.archived.has(id)).toBe(true);
+
+      expect(f.access.query!({}).assignments).toEqual([]);
+      const all = f.access.query!({ includeArchived: true }).assignments;
+      expect(all).toHaveLength(1);
+      expect(all[0]).toMatchObject({ sessionId: id });
+      expect(all[0]!.archivedAt).toEqual(expect.any(String));
+      expect(all[0]!.continuityKey).toBeUndefined();
+
+      expect(
+        f.access.request({ sessionId: id, mode: 'next-turn', text: 'One more thing' }),
+      ).toMatchObject({
+        outcome: 'refused',
+        code: 'assignment-ended',
+        delivery: 'refused',
+        assignment: { sessionId: id },
+      });
+
+      const next = f.create('Ship the next release notes', 'release-notes');
+      expect(next).not.toBe(id);
+      await f.settle(next);
+
+      await expect(f.access.archive!(id)).resolves.toMatchObject({ outcome: 'archived' });
+      expect(f.nativeCalls).toEqual([`archive:${id}`]);
+    } finally {
+      await f.close();
+    }
+  }, 60000);
+
+  it('unarchives an Assignment back into the default directory', async () => {
+    const f = await fixture();
+    try {
+      const id = f.create('Investigate flaky test');
+      await f.settle(id);
+      await f.access.archive!(id);
+      const restored = await f.access.unarchive!(id);
+      expect(restored).toMatchObject({ outcome: 'unarchived' });
+      expect(restored.assignment.archivedAt).toBeUndefined();
+      expect(f.archived.has(id)).toBe(false);
+      expect(f.access.query!({}).assignments.map((a) => a.sessionId)).toEqual([id]);
+    } finally {
+      await f.close();
+    }
+  }, 60000);
+
+  it('refuses a wake that races an archive in flight', async () => {
+    let open!: () => void;
+    const f = await fixture({ nativeGate: new Promise<void>((resolve) => (open = resolve)) });
+    try {
+      const id = f.create('Racing archive', 'racing');
+      await f.settle(id);
+      const archiving = f.access.archive!(id);
+      expect(f.access.request({ sessionId: id, mode: 'next-turn', text: 'Wake up' })).toMatchObject(
+        { outcome: 'refused', code: 'assignment-ended' },
+      );
+      expect(() =>
+        f.access.create({
+          title: 'Assignment',
+          grantId: TEST_GRANT_ID,
+          description: 'Reuse',
+          key: 'racing',
+        }),
+      ).toThrow(/archived/);
+      open();
+      await expect(archiving).resolves.toMatchObject({ outcome: 'archived' });
+      expect(f.core.runtime.getAssignment('ada', id)).toMatchObject({ activity: 'idle' });
+    } finally {
+      await f.close();
+    }
+  }, 60000);
+
+  it('leaves the directory unchanged when DSH refuses the archive', async () => {
+    const refusal = Object.assign(new Error('Session is active'), {
+      name: 'WorkspaceActiveSessionError',
+      activity: [{ kind: 'job' }],
+    });
+    const f = await fixture({ nativeRefusal: refusal });
+    try {
+      const id = f.create('Native refusal', 'native');
+      await f.settle(id);
+      await expect(f.access.archive!(id)).resolves.toMatchObject({
+        outcome: 'refused',
+        code: 'assignment-active',
+      });
+      const [row] = f.access.query!({}).assignments;
+      expect(row).toMatchObject({ sessionId: id, continuityKey: 'native' });
+      expect(row!.archivedAt).toBeUndefined();
+    } finally {
+      await f.close();
+    }
+  }, 60000);
+});
+
+describe('Orchestrator Assignment Directory query', () => {
+  it('requires a bounded Title and Description and names the missing field', async () => {
+    const f = await fixture();
+    try {
+      const create = (input: { title: string; description: string }) =>
+        f.access.create({ ...input, grantId: TEST_GRANT_ID });
+      expect(() => create({ title: '  ', description: 'Check the release.' })).toThrow(
+        'create_assignment: title is required and must not be blank',
+      );
+      expect(() => create({ title: 'Check release', description: '' })).toThrow(
+        'create_assignment: description is required and must not be blank',
+      );
+      expect(() => create({ title: 'x'.repeat(81), description: 'Check the release.' })).toThrow(
+        'create_assignment: title must be at most 80 characters',
+      );
+      const created = create({ title: ' Check release ', description: ' Check the release. ' });
+      expect(created).toMatchObject({
+        outcome: 'created',
+        assignment: { title: 'Check release', description: 'Check the release.' },
+      });
+      const sessionId = created.outcome === 'created' ? created.assignment.sessionId : '';
+      expect(f.live.runs.find((run) => run.sessionId === sessionId)?.text).toBe(
+        'Check the release.',
+      );
+      const instructed = f.access.create({
+        title: 'Audit exports',
+        description: 'Audit the billing exports.',
+        instructions: 'Compare March with the ledger and list every gap.',
+        grantId: TEST_GRANT_ID,
+      });
+      const instructedId = instructed.outcome === 'created' ? instructed.assignment.sessionId : '';
+      expect(f.live.runs.find((run) => run.sessionId === instructedId)?.text).toBe(
+        'Compare March with the ledger and list every gap.',
+      );
+      expect(f.access.inspect(instructedId)).toMatchObject({
+        title: 'Audit exports',
+        description: 'Audit the billing exports.',
+      });
+    } finally {
+      await f.close();
+    }
+  }, 60000);
+
+  it('searches Title, Description, key and latest report, filters activity, and pages with a cursor', async () => {
+    const f = await fixture();
+    try {
+      const alpha = f.create('Fix login redirect', 'login');
+      const beta = f.create('Write onboarding docs', 'docs');
+      const gamma = f.create('Benchmark search index');
+      const delta = f.create('Measure cold start on Android', undefined, 'Startup profiling');
+
+      expect(f.access.query!({ query: 'startup' }).assignments.map((a) => a.sessionId)).toEqual([
+        delta,
+      ]);
+      expect(f.access.query!({ query: 'cold start' }).assignments.map((a) => a.sessionId)).toEqual([
+        delta,
+      ]);
+      await f.settle(delta);
+      await f.access.archive!(delta);
+      const methods = createBridgeMethods(OWNER_HUMAN_CONTEXT, { ...f.core });
+      expect(methods.assignments({ slug: 'ada', query: 'startup' })).toEqual({
+        ok: true,
+        value: { assignments: [] },
+      });
+      expect(
+        methods.assignments({ slug: 'ada', query: 'STARTUP', includeArchived: true, limit: 5 }),
+      ).toMatchObject({
+        ok: true,
+        value: {
+          assignments: [
+            {
+              sessionId: delta,
+              title: 'Startup profiling',
+              description: 'Measure cold start on Android',
+            },
+          ],
+        },
+      });
+      expect(methods.assignments({ slug: 'ada', limit: 0 })).toMatchObject({ ok: false });
+      expect(
+        methods.assignments({ slug: 'ada', query: 'onboarding', activity: [], limit: 20 }),
+      ).toMatchObject({ ok: true, value: { assignments: [{ sessionId: beta }] } });
+      expect(methods.assignment({ slug: 'ada', sessionId: delta })).toMatchObject({
+        ok: true,
+        value: { assignment: { title: 'Startup profiling' } },
+      });
+      const gammaRun = f.live.runs.find((run) => run.sessionId === gamma)!;
+      await gammaRun.report({ state: 'progress', summary: 'Latency regression found in Login' });
+      await f.settle(beta);
+
+      const byPurpose = f.access.query!({ query: 'onboarding' }).assignments;
+      expect(byPurpose.map((a) => a.sessionId)).toEqual([beta]);
+      const byKeyOrReport = f.access.query!({ query: 'LOGIN' })
+        .assignments.map((a) => a.sessionId)
+        .sort();
+      expect(byKeyOrReport).toEqual([alpha, gamma].sort());
+
+      const working = f.access.query!({ activity: ['working'] }).assignments;
+      expect(working.map((a) => a.sessionId).sort()).toEqual([alpha, gamma].sort());
+
+      const first = f.access.query!({ limit: 2 });
+      expect(first.assignments).toHaveLength(2);
+      expect(first.nextCursor).toEqual(expect.any(String));
+      const second = f.access.query!({ limit: 2, cursor: first.nextCursor! });
+      expect(second.assignments).toHaveLength(1);
+      expect(second.nextCursor).toBeUndefined();
+      const seen = [...first.assignments, ...second.assignments].map((a) => a.sessionId);
+      expect(new Set(seen)).toEqual(new Set([alpha, beta, gamma]));
+
+      expect(() => f.access.query!({ limit: 0 })).toThrow();
+      expect(() => f.access.query!({ cursor: 'not-a-cursor' })).toThrow();
+    } finally {
+      await f.close();
+    }
+  }, 60000);
+});
+
+describe('Human Assignment archive from the Sessions view', () => {
+  it('lists archive and report state, then archives and restores through the bridge', async () => {
+    const f = await fixture();
+    try {
+      const methods = createBridgeMethods(OWNER_HUMAN_CONTEXT, { ...f.core });
+      const id = f.create('Ship the release notes');
+      const run = f.live.runs.find((item) => item.sessionId === id)!;
+      await run.report({ state: 'waiting-human', summary: 'Which version?' });
+      await expect(
+        methods.sessionArchiveSet({ slug: 'ada', sessionId: id, archived: true }),
+      ).resolves.toMatchObject({ ok: false });
+      await f.settle(id);
+      const listed = () => {
+        const result = methods.sessions({ slug: 'ada' });
+        if (!result.ok) throw new Error('sessions failed');
+        return result.value.sessions.find((session) => session.sessionId === id);
+      };
+      expect(listed()).toMatchObject({
+        assignmentReportState: 'waiting-human',
+        assignmentTitle: 'Ship the release notes',
+      });
+      expect(listed()?.assignmentArchived).toBeUndefined();
+      await expect(
+        methods.sessionArchiveSet({ slug: 'ada', sessionId: id, archived: true }),
+      ).resolves.toEqual({ ok: true, value: { archived: true } });
+      expect(listed()).toMatchObject({ assignmentArchived: true });
+      await expect(
+        methods.sessionArchiveSet({ slug: 'ada', sessionId: id, archived: false }),
+      ).resolves.toEqual({ ok: true, value: { archived: false } });
+      expect(listed()?.assignmentArchived).toBeUndefined();
+      expect(f.nativeCalls).toEqual([`archive:${id}`, `unarchive:${id}`]);
+    } finally {
+      await f.close();
+    }
+  }, 60000);
+});
+
+describe('Assignment Concurrency Limit default', () => {
+  it('allows eight executing Assignments and refuses the ninth', async () => {
+    const f = await fixture();
+    try {
+      for (let index = 0; index < 8; index += 1) f.create(`Parallel ${index}`);
+      const ninth = f.access.create({
+        title: 'Assignment',
+        grantId: TEST_GRANT_ID,
+        description: 'One too many',
+      });
+      expect(ninth).toMatchObject({ outcome: 'capacity', limit: 8, activeCount: 8 });
+    } finally {
+      await f.close();
+    }
+  }, 60000);
+});

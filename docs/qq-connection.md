@@ -1,0 +1,130 @@
+# Connect a Bot to QQ groups
+
+Use a **QQ Bot application authorized through Tencent's official platform**. This path connects a PersonaBot to an application that has joined a QQ group. Start with one application, one Bot and a dedicated test group.
+
+This is the development slice tracked by [#1152](https://github.com/BotHarness/BotHarness/issues/1152). It requires the qualified Provider selected by `scripts/dev-im-provider.mjs`; an arbitrary dsh-im installation does not provide its checked contract. Public release and the remaining [QQ capabilities](https://github.com/BotHarness/BotHarness/issues/1149) have separate delivery records.
+
+## Connect and bind the application
+
+1. Create an application in the [official QQ Bot platform](https://bot.q.qq.com/open). Follow its current application eligibility and group membership requirements. Add the application to your test group.
+2. Confirm that your PersonaBot can answer a local DM using the chosen model.
+3. Open **Settings → IM Bots → QQ → Manual setup** to connect an existing App, and enter its AppID and AppSecret directly in the native form with recording stopped. **Scan QR code** creates and connects a new Bot; use it when a new App is intended. Keep credentials in the native Credentials Service. Developers with an existing native authorization can use the [QQ QA reuse helper](agents/qq-test-clients.md) instead of retyping the Secret.
+4. Open the Bot's DM, then **Channel sidebar → External identities → Bind app**. Select your QQ application and bind it. The ready state means its group mentions can reach this Bot's Inbox. You do not need to save a delivery target or authorize each group separately.
+5. In QQ, @mention the application with a short text question. Inspect the **Bot Inbox**, open its source, and check the reply in the original QQ group.
+
+An application belongs to one Bot. The Bot replies through the application that received the message. The platform controls who can reach that application through its availability and group membership settings.
+
+## Manage a received group conversation
+
+After the first mention, open the application's **Edit identity** conversation list. The trusted group locator belongs to the authenticated application; its name or numeric QQ group number cannot replace that locator.
+
+- Choose **Sync**, select a Group Channel containing this Bot, and apply. Future eligible mentions appear there and enter the existing Bot Inbox; replies still go to the original QQ group through the receiving app.
+- **Stop syncing** stops future Channel placement. With the default Inbox route enabled, reception becomes Inbox-only. Accepted Channel history stays readable and is never copied into another Channel or the Human–Bot DM.
+- **Mute** keeps reception without waking the Bot. **Block** stops intake and cancels unsent authority. **Allow again** admits future messages without backfilling blocked events, including later redelivery.
+- Pausing a route changes that route; pausing the app stops its reception and pending authority; archiving keeps the Bot inactive. Restart preserves durable choices. Rebinding the same authenticated app preserves blocks and mute preferences; revoked Channel authorizations require a new selection.
+
+Expand **Reception intervals** to inspect pause, block, waiting and connection records. **Local control boundaries** come from local actions; **Local observation times** come from connection checks. After an unclean restart, an **unverified continuity** range spans the last observation to the next check. These ranges cannot establish missed-message counts. Each app retains the latest 128 closed intervals and current intervals, without another message transcript.
+
+See [#1153](https://github.com/BotHarness/BotHarness/issues/1153) and [ADR-0152](adr/0152-qq-reception-intervals-record-local-observations.md).
+
+## Use two Bots in the same QQ group
+
+Authorize each official QQ application independently, add both to the dedicated QQ group, and bind each application to its owning PersonaBot. **Bind app** identifies existing owners and refuses assigning their app to another Bot.
+
+1. Add both PersonaBots to the selected local Group Channel.
+2. @mention each application in QQ. Open each owner's conversation list to verify its independently received conversation.
+3. Use **Sync** on each conversation to select that same local Group Channel. App-scoped group locators can differ even for the same real QQ group; names, text and matching locators never establish an automatic mapping.
+4. Send another distinguishable mention to each application. Inspect each owner's Inbox and own-app native reply. The Channel author label includes the receiving app name; **Source details** also shows its receiving app ID. These are attribution fields, not reply authority.
+
+Shared Channel reading never lends the receiving app's identity or passive reply proof. A Bot without its own qualified conversation is refused; multiple qualified own apps produce an explicit ambiguity refusal. Blocking, unbinding or archiving one owner fences that owner's effects while preserving accepted Channel history and the other owner's identity. Similar content or message IDs across apps remain independent sources.
+
+The qualified QQ Provider currently declares native reply receipts, without `own-text-echo`. An accepted receipt is not an observed Echo; it must not create another source or new attention. Cross-app native events remain independent, and text matching must never conceal them. See [#1156](https://github.com/BotHarness/BotHarness/issues/1156) for real qualification and the outstanding native Echo boundary.
+
+## Optional native observation candidate
+
+The maintained candidate also preserves native mention names and IDs for the existing username chips. Hover a chip to inspect its native ID. Unknown names remain literal text; mention presentation does not establish Bot author identity or merge events across Apps. QQ voice playback uses the same audio card as sent message attachments, with keyboard playback and seeking. **Prepare playback** remains explicit, and download saves the original voice file rather than the converted WAV.
+
+The optional developer Provider selected by `scripts/dev-im-provider.mjs` adds a reviewed SDK 1.0.4 build patch that observes WebSocket messages before decode/JSON parsing, plus bounded phase metadata and process-local start/end counters in the existing connection status. It records no raw payload or credential and grants no intake, sending or Echo capability. Compare captured phases with the counters, suppression and capture capacity for each new native window. This candidate is separate from the default managed product Provider and has not qualified native own Echo; see [Provider #26](https://github.com/DoodleBears/dsh-im/pull/26) and its [bilingual observation contract](https://github.com/DoodleBears/dsh-im/blob/1eee207c0c23fc98aa26e329f753c1de8b910aff/docs/qq-native-observation.md).
+
+The [transport-J qualification](https://github.com/BotHarness/DeepSeekBot/issues/1156#issuecomment-6129948447) on product `7c9b3b6f` / Provider `43902c6` confirmed both current local DMs and each application's matching reply in the original QQ group after a guarded Profile restart. All six observed group frames reached the SDK WebSocket, Gateway and normalized callback boundaries without capture loss. No same-App native own callback or Core Echo fact was observed. This bounded result does not prove that QQ never reflects a message. The [review explainer](/evidence/issue-1156/qq-transport-observer.html) records the maintained patch and its limits; remaining lifecycle and final-version evidence stays tracked in #1156.
+
+## Use group images (development candidate)
+
+The [#1157](https://github.com/BotHarness/BotHarness/issues/1157) candidate extends the same mention-only route with PNG, JPEG, GIF and WebP images. Send a new @mention with a caption and an image. A synced conversation displays the image in its original Channel message through the shared preview. Inbox-only reception still works without Channel placement. Opening a preview does not wake a Bot.
+
+Actual visual understanding requires an image-capable model on the calling Session. The Bot can save an authorized working copy with `bridge_attachment_save`, read it through native `read_image`, import a selected result with `channel_attachment_import`, then reply with `bot_send_message`. Download or preview success alone does not establish understanding; unsupported models must report that they cannot inspect the image.
+
+Images use the existing 25 MiB limit. Private QQ download URLs and upload tickets stay in the Provider; public sources retain safe metadata and attachment association. Caption-first display preserves attachment array order without claiming native text/image interleaving. Quoted and unsupported compound payloads remain excluded. Restart retains canonical source metadata and acquired previews, but cannot reconstruct an unacquired private download ticket or expired reply proof.
+
+Use `bot_send_message` with the trusted source_event_id. Image replies use one imported attachment and empty body; separate useful text replies use the same source. Each message has its own identity. An unknown outcome must be inspected, not retried as a new call.
+
+Image results use the receiving app and original group. Upload is separate from the single final message send, with authorization checked again after upload. A native message receipt records provider acceptance; unknown results are not automatically resent. Real QQ/model/Client image qualification is tracked on #1157 and is not implied by this candidate contract.
+
+## Process group files (development candidate)
+
+The [#1158](https://github.com/BotHarness/DeepSeekBot/issues/1158) candidate negotiates ordinary files separately from images. A native group @mention can carry a direct file or a qualifying explicit file quote. If QQ sends files separately, reply to the file, select @Bot in that reply and add the processing request. The current native type-103 quote must contain one actual file block with consistent reference indices and matching group/message/author identity; adjacency alone does not establish source association. The quoted file belongs to this current mention Source and its reply authority, without reconstructing a historical message. Real QQ qualification on 2026-10-08 accepted this quoted-file path. A scalar `message_type:103` on the file block is metadata; recursive quote structure remains unsupported. Tencent's native `file` category becomes opaque `application/octet-stream` metadata; it is not a platform MIME claim.
+
+A synced Channel shows the existing file card with **Download to this device**. Each request checks current Channel membership, source placement, receiving identity and conversation authority. The original file is acquired lazily into the canonical AttachmentStore, bounded to 25 MiB and served as a download. Inbox-only reception uses the same source without requiring Channel placement.
+
+To process a file, the Bot saves an independent copy with `bridge_attachment_save` into a currently write-authorized Workspace Grant, edits that copy, imports the selected output with `channel_attachment_import`, then sends it using `bot_send_message`. The stored original remains unchanged. Send the file as one imported attachment with empty body. Separate useful explanations reply to the same source, not a local DM fallback.
+
+Native file output uploads with `file_type=4` without sending, then rechecks current authority before one original-group message POST. Its native receipt records provider acceptance; an unknown outcome is not retried. Audio/video-native output is outside this file slice.
+
+**Qualified test application:** on 2026-10-08, the maintained Provider `6d24d1f` on DSH `0.2.0-rc.1` and one authorized QQ application received a quoted CSV, acquired it from the native download host, saved and read an independent working copy, and returned a distinct `total.csv` through its own identity in the original group. The Human downloaded the result and confirmed `total_quantity` followed by `5`; the stored original remained unchanged. This qualifies that application and quoted-file path, not every QQ application, direct-file carrier or the modern upstream Host runtime. Verify permissions with each target application; SDK support alone does not establish them. Private tickets are process-local and cannot be reconstructed after restart.
+
+## Understand the text path
+
+### Delayed results and explicit proactive posts
+
+The #1154 source candidate enables checked proactive text for an explicitly authorized saved QQ group target. The current Provider does not offer QQ group discovery, so use the existing saved-target authorization rather than treating a received mention as a proactive grant. Current app identity, target, conversation block, final authorization and the shared hourly post limit remain checked at send time.
+
+If a task finishes after QQ's five-minute reply window, `bot_send_message` records the failed `reply-window-expired` and retains the result in Outbox. To deliver that task's result, the Bot can inspect `bridge_targets`, choose a `canPost` target belonging to its own app and the exact original group, then explicitly call `bot_send_message` with its explicit authorized grant_id. Without that target or platform permission, keep the result locally. Neither an unknown reply nor an unknown proactive outcome permits a new send; inspecting the same request after restart does not resend it.
+
+The saved-target Web send action uses the same checked post and native receipt. Provider acceptance is separate from seeing the result in QQ. Real delayed-task, refusal and current-artifact qualification remain tracked in [#1154](https://github.com/BotHarness/DeepSeekBot/issues/1154); ordinary group observation and intentional participation remain [#1155](https://github.com/BotHarness/DeepSeekBot/issues/1155).
+
+**Qualified test application:** on 2026-10-14, the QA2 app on the `0df23253` worktree Host, DSH `0.2.0-rc.2` and the immutable `.20` Provider completed a genuine QQ-requested Schedule after 400.542 seconds. Its original reply was retained as `reply-window-expired`; a separate owned, authorized original-group post received a native receipt, and the Human confirmed one correct result. A real shared-hourly-limit refusal retained another result locally. Both original test Apps resumed normal replies after restoration. This qualifies that tested source/runtime path; final packed-product execution and matched visual evidence remain separate gates. See the [qualification record](research/2026-10-14-qq-delayed-native-qualification.md).
+
+| Behavior        | Current contract                                                |
+| --------------- | --------------------------------------------------------------- |
+| Input           | Text from a trusted `GROUP_AT_MESSAGE_CREATE` event             |
+| Destination     | The same application-scoped QQ group                            |
+| Reply           | Native text reply associated with the original message          |
+| Receipt         | QQ's native response message ID; this means provider acceptance |
+| Pause or unbind | Stops new intake and fences unsent replies                      |
+| Duplicate event | Reuses its canonical Source Event and Inbox Admission           |
+| Uncertain send  | Retains an unknown outcome; no automatic resend                 |
+
+The [official group send contract](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_messages.post.html) gives passive replies a five-minute window and a five-reply limit per source message. The Bot does not automatically switch an expired reply to a proactive send. A provider receipt does not prove that a person received or read the message.
+
+The text slice excludes private QQ messages, ordinary group traffic, attachments and compound or quoted payloads. [Ordinary group events](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/group_message_create.html) additionally require the application's receive-all setting; their explicit opt-in is tracked separately. Images, files, voice input and delayed proactive reports follow in the later slices.
+
+QQ does not provide this consumer with a group-history API or a durable resume cursor. Disconnects can leave gaps. After a Host restart, previously retained sources remain inspectable, but their process-local reply proof is unavailable until a qualifying native event is delivered again. An old source must never become permission to send an unrelated new message.
+
+## Ordinary group text candidate
+
+The [#1155](https://github.com/BotHarness/DeepSeekBot/issues/1155) development candidate adds checked ordinary text from the Provider's exclusive QQ consumer. Mentions-only remains the collection default. The software capability does not prove receive-all permission: a fresh non-mentioned native group event must reach the active receiver before the existing Client can enable **all messages** for that conversation. A probe in mentions-only mode supplies current delivery evidence without placing its ordinary content in canonical collection or waking the Bot.
+
+Saved collection preference and current receiver evidence stay separate. With explicit collection enabled, eligible ordinary messages keep their own member, group and message attribution in the existing local Inbox/Channel path. The #3221 candidate explicitly extends the former text-only slice to supported direct images and files when the connector negotiated the corresponding attachment capability. Mentions-only collection still excludes ordinary messages; disabled capabilities and unsupported formats remain unreadable. Quoted ordinary media, voice and remote QQ group history are unchanged. Observation and count/time harvest can wake a Bot independently of direct mentions, without requiring a reply to every event. Intentional speech uses the independently authorized own-app proactive path; receiving ordinary media does not grant passive reply permission. Native QQ acceptance of this extension remains unverified.
+
+Switching back to mentions-only stops future ordinary collection. Blocking, disabling or losing the receiver applies existing fences; reconnect keeps valid preferences but requires current delivery evidence again. Events from a blocked intake interval do not qualify the newly allowed conversation or reconstruct missing history. Real QQ event, Client opt-in, understanding and contribution acceptance remain pending for this candidate.
+
+## If the app does not appear or cannot reply
+
+- Check the connection under **Settings → IM Bots → QQ**. An online receiver and a verified application identity are both required.
+- Expand the application's **Diagnostic details**. Safe HTTP status, platform error code and qualification guidance help distinguish credential, permission and response failures. Do not share credentials or authorization QR codes.
+- For an expired source, send a fresh @mention in QQ. An unknown send outcome needs inspection in the group before another message is requested.
+- Check that the Bot, binding and conversation are enabled and allowed. Pausing, blocking or unbinding invalidates pending authority.
+
+The [Provider integration guide](dev/guides/im-provider-integration.md) and [ADR-0151](adr/0151-qq-group-replies-use-authenticated-apps-and-process-local-source-proof.md) describe the implementation boundary.
+
+## Receive and play group voice
+
+QQ does not let this test client attach voice and @mention in one message: send one voice message, then explicitly quote that original voice and select @Bot. A separately typed instruction is optional when the spoken request is already clear. A native voice carrier that includes a mention is accepted by contract but has not been qualified on this client. Only a matching native quoted attachment belongs to the current request; nearby messages are not associated.
+
+The synced **group Channel** and **Source details** distinguish a QQ platform transcript from unavailable transcription. The Channel keeps the original-audio download and **Prepare playback** next to the source message; playback does not create another Inbox admission or wake the Bot. Only the native voice attachment's `asr_refer_text` supplies a platform transcript; user instructions do not. The existing Orchestrator can read that transcript and return text through the receiving app in the original group. No speech-recognition service is automatically configured when QQ provides none.
+
+Original audio is downloaded only on request under current source/app/Grant checks, with a 1 MiB bound. **Prepare playback** creates a separate WAV using the existing bounded SILK Worker; it never changes the original or transcribes it. The player does not autoplay. A valid SILK payload, including a proven SILK payload after an AMR wrapper, is supported; genuine AMR and other codecs remain unsupported and their originals can still be downloaded. The optional native platform WAV URL is not fetched in this candidate.
+
+**Qualified test application:** on 2026-10-08, maintained Provider `60be59a` on DSH `0.2.0-rc.1` received an explicitly quoted native QQ voice attachment with platform ASR, admitted one Source/Inbox/Channel message, and the existing model answered the spoken question through the same application in the original group. The Human confirmed `24`. The 12,775-byte SILK original was unchanged by download and playback; actual Client keyboard preparation/playback reached the end of its separate 6.4-second WAV without autoplay. This qualifies this application and quoted native-ASR/SILK path, not every application, codec, direct carrier or modern upstream Host. Missing-ASR behavior remains explicit and fixture-tested. No outgoing voice or TTS is implemented.
+
+When the QQ App already uses full reception, a `GROUP_MESSAGE_CREATE` is still a direct request only if its native top-level `mentions` contains `is_you === true`. Foreign or quoted-only mentions, ordinary messages and Bot authors remain excluded from checked Human intake. Candidate Provider `018533fd` restores this carrier on the current maintained RC1 composition; public-seam regressions pass, but fresh qualification of this combined product remains pending. This does not enable ordinary collection or qualify own Echo.
