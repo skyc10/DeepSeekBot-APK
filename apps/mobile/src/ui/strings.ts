@@ -2605,6 +2605,14 @@ const en = {
     test: 'Test connection',
     testing: 'Testing…',
   },
+  routeSelector: {
+    title: 'Route',
+    connect: 'Connect',
+    tailscale: 'Tailscale',
+    lan: 'LAN',
+    hint: 'Switch to Tailscale or LAN for full settings access.',
+    failed: 'Route selection was not saved. Try again.',
+  },
 };
 
 const zh: typeof en = {
@@ -5022,6 +5030,14 @@ const zh: typeof en = {
     copied: '已复制地址',
     test: '测试连接',
     testing: '正在测试…',
+  },
+  routeSelector: {
+    title: '连接线路',
+    connect: '中转',
+    tailscale: 'Tailscale',
+    lan: '局域网',
+    hint: '切换到 Tailscale 或局域网可获得完整设置权限。',
+    failed: '线路选择未保存，请重试。',
   },
 };
 

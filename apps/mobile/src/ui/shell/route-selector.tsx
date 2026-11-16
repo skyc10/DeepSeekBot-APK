@@ -27,7 +27,8 @@ function isLanHost(host: string): boolean {
   const parts = host.split('.');
   if (parts.length !== 4 || parts.some((p) => !/^\d{1,3}$/u.test(p) || Number(p) > 255))
     return false;
-  const [a, b] = parts.map(Number);
+  const a = Number(parts[0]);
+  const b = Number(parts[1]);
   return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
 }
 
@@ -42,10 +43,10 @@ export function RouteSelector() {
     ? classifyRoute(currentPreference)
     : classifyRoute(currentRoute);
 
-  const handleChange = async (kind: RouteKind) => {
+  const handleChange = (kind: RouteKind) => {
     const target = routes.find((r) => classifyRoute(r) === kind) ?? routes[0];
     if (target && client?.setRoutePreference) {
-      await client.setRoutePreference(target);
+      void client.setRoutePreference(target).catch(() => undefined);
     }
   };
 
@@ -53,21 +54,21 @@ export function RouteSelector() {
 
   return (
     <SettingsFormItem>
-      <Segmented
-        label={t.routeSelector?.title ?? 'Route'}
-        options={[
-          { value: 'connect' as RouteKind, label: t.routeSelector?.connect ?? 'Connect' },
-          { value: 'tailscale' as RouteKind, label: t.routeSelector?.tailscale ?? 'Tailscale' },
-          { value: 'lan' as RouteKind, label: t.routeSelector?.lan ?? 'LAN' },
-        ]}
-        value={currentKind}
-        onChange={handleChange}
-      />
-      {client?.secretInputAllowed?.() === false ? null : (
-        <Notice tone="info">
-          {t.routeSelector?.hint ?? 'Switch to Tailscale or LAN for full settings access.'}
-        </Notice>
-      )}
+      <>
+        <Segmented
+          label={t.routeSelector.title}
+          options={[
+            { value: 'connect' as RouteKind, label: t.routeSelector.connect },
+            { value: 'tailscale' as RouteKind, label: t.routeSelector.tailscale },
+            { value: 'lan' as RouteKind, label: t.routeSelector.lan },
+          ]}
+          value={currentKind}
+          onChange={handleChange}
+        />
+        {client?.secretInputAllowed?.() === false ? null : (
+          <Notice tone="warning">{t.routeSelector.hint}</Notice>
+        )}
+      </>
     </SettingsFormItem>
   );
 }
