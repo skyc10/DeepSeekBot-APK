@@ -27,15 +27,25 @@ describe('resolveTheme - preset drives primary', () => {
     expect(resolveTheme('dark', { accent: '#5b2ecc' }).color.accent).toBe('#5b2ecc');
   });
 
-  it('an invalid accent falls back to the preset palette primary', () => {
-    const defaultAccent = resolveTheme('light', { scheme: 'light', preset: 'classic-blue' }).color
-      .accent;
-    expect(resolveTheme('light', { accent: 'red' }).color.accent).toBe(defaultAccent);
+  it('an invalid accent falls back to the preset primary, not the palette accent', () => {
+    // Regression: an invalid accent used to reach withAccent, which returned palette.accent
+    // (#3e70db) instead of the preset primary (#4176e6).
+    expect(resolveTheme('light', { accent: 'red' }).color.accent).toBe(
+      APPEARANCE_PRIMARY['classic-blue'].light,
+    );
+    expect(resolveTheme('dark', { accent: 'not-a-color' }).color.accent).toBe(
+      APPEARANCE_PRIMARY['classic-blue'].dark,
+    );
   });
 
-  it('accent takes precedence over an explicit primary (integration branch parity)', () => {
+  it('a valid accent takes precedence over an explicit primary', () => {
     const t = resolveTheme('light', { primary: '#111111', accent: '#FFD60A' });
     expect(t.color.accent).toBe('#ffd60a');
+  });
+
+  it('an invalid accent yields to an explicit primary', () => {
+    const t = resolveTheme('light', { primary: '#111111', accent: 'red' });
+    expect(t.color.accent).toBe('#111111');
   });
 });
 

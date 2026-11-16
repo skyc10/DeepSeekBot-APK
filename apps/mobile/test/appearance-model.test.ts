@@ -95,6 +95,17 @@ describe('appearance model - wallpaper media', () => {
     ).toMatchObject({ kind: 'video', id: 'loop.mp4', posterId: 'loop.jpg' });
   });
 
+  it('clamps wallpaper fade into 0..100 with a safe default for non-numbers', () => {
+    const fadeOf = (fade: unknown) =>
+      coerceWallpaper({ kind: 'image', id: 'wp.jpg', fit: 'cover', x: 0.5, y: 0.5, fade })?.fade;
+    expect(fadeOf(0)).toBe(0);
+    expect(fadeOf(100)).toBe(100);
+    expect(fadeOf(500)).toBe(100);
+    expect(fadeOf(-20)).toBe(0);
+    expect(fadeOf('bad')).toBe(60);
+    expect(fadeOf(undefined)).toBe(60);
+  });
+
   it('rejects malformed media ids and colors', () => {
     expect(coerceWallpaper({ kind: 'image', id: '../evil.jpg' })).toBeUndefined();
     expect(coerceWallpaper({ kind: 'video', id: 'x.exe' })).toBeUndefined();

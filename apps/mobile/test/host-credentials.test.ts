@@ -101,4 +101,17 @@ describe('credentials transport', () => {
     fail(new Error('network'));
     await expect(unsetCredential(client, 'KEY')).resolves.toEqual({ kind: 'error' });
   });
+
+  it('keeps ordinary error text intact for short secrets', async () => {
+    const { client, fail } = harness();
+    fail(new MethodRefused('credentials/invalid', 'bad value'));
+    await expect(setCredential(client, 'KEY', 'v')).resolves.toEqual({
+      kind: 'rejected',
+      message: 'bad value',
+    });
+    await expect(setCredential(client, 'KEY', 'sk-')).resolves.toEqual({
+      kind: 'rejected',
+      message: 'bad value',
+    });
+  });
 });
