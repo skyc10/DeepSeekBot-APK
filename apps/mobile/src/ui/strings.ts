@@ -205,6 +205,7 @@ const en = {
     lan: 'LAN',
     hint: 'Switch to Tailscale or LAN for full settings access.',
     failed: 'Could not switch the route. The previous selection is still active. Try again.',
+  },
   themeSettings: {
     title: 'Theme',
     preset: 'Color theme',
@@ -2925,6 +2926,7 @@ const zh: typeof en = {
     lan: '局域网',
     hint: '切换到 Tailscale 或局域网以获得完整设置访问权限。',
     failed: '切换路由失败，仍保持原选择，再试一次。',
+  },
   themeSettings: {
     title: '主题',
     preset: '配色主题',
