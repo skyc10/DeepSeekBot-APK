@@ -447,7 +447,6 @@ export interface ClientRequest {
   type: 'client-request';
   rpcId: string;
   method: string;
-  /** dsh-im routes send a raw payload; botharness routes wrap it under `args`. */
   payload: Record<string, unknown>;
 }
 
