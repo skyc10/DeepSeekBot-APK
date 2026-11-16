@@ -94,7 +94,8 @@ export function AppSetupView({ port, onClose }: { port: AppSetupPort; onClose():
       setMessage('');
       return true;
     }
-    if (result.kind === 'rejected') setMessage(result.message === '' ? copy.rejected : result.message);
+    if (result.kind === 'rejected')
+      setMessage(result.message === '' ? copy.rejected : result.message);
     else if (result.kind === 'refused') setMessage(copy.refused);
     else setMessage(copy.saveFailed);
     return false;

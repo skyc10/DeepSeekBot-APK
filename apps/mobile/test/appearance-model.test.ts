@@ -119,9 +119,9 @@ describe('appearance model - wallpaper media', () => {
   it('paintSource falls back to video poster', () => {
     expect(paintSource(undefined)).toBeUndefined();
     expect(paintSource({ kind: 'color', color: '#fff' })).toBeUndefined();
-    expect(paintSource({ kind: 'image', id: 'a.jpg', fit: 'cover', x: 0.5, y: 0.5, fade: 60 })).toBe(
-      'a.jpg',
-    );
+    expect(
+      paintSource({ kind: 'image', id: 'a.jpg', fit: 'cover', x: 0.5, y: 0.5, fade: 60 }),
+    ).toBe('a.jpg');
     expect(
       paintSource({
         kind: 'video',

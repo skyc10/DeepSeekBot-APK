@@ -3536,8 +3536,7 @@ const zh: typeof en = {
     revision: (revision: number) => `版本 ${revision}`,
     valueLabel: '值（JSON）',
     invalidJson: '请输入合法的 JSON 对象。',
-    secretsHint: (count: number) =>
-      `有 ${count} 项凭据单独管理，此处不显示也不可修改。`,
+    secretsHint: (count: number) => `有 ${count} 项凭据单独管理，此处不显示也不可修改。`,
     save: '保存',
     saved: '已保存。',
     saveFailed: '保存失败，再试一次。',
