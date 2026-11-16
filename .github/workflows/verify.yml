@@ -101,7 +101,9 @@ jobs:
           cache: pnpm
       - name: Reject Git-hosted PR evidence
         env:
-          EVIDENCE_BASE: ${{ github.event.pull_request.base.sha || github.event.before || '' }}
+          # Snapshot evidence fixtures were restored from upstream at this commit;
+          # PR-evidence policy for manual runs starts after the restore.
+          EVIDENCE_BASE: ${{ github.event.pull_request.base.sha || github.event.before || '9c85011a5aa3bab2d45ab8952663f9e71566cefc' }}
         run: |
           if [ -n "$EVIDENCE_BASE" ] && [ "$EVIDENCE_BASE" != "0000000000000000000000000000000000000000" ]; then
             git fetch --no-tags --depth=1 origin "$EVIDENCE_BASE"
