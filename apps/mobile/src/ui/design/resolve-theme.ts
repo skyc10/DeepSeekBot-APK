@@ -2,36 +2,19 @@ import {
   humanBubbleColors,
   readable,
 } from '../../../../../packages/client/src/client/bot-name-color';
+import {
+  type Material,
+  type ModeConfig,
+  type ThemePreset,
+  type ThemeStyle,
+} from '../appearance-model';
 import { layers, tint, type Layer, type LayerName } from './layers';
 import { palette } from './palette.generated';
 import { mono, touch, typeScale, weight, type PlatformOS } from './tokens';
 
-export type ColorRole = keyof typeof palette.light;
+export type { AppearanceDocument, Material, ThemePreset, ThemeStyle } from '../appearance-model';
 
-export type ThemePreset = 'classic-blue' | 'mist-purple' | 'forest-green' | 'warm-amber';
-export type ThemeStyle = 'default' | 'glass' | 'image';
-export type Material = { color: string; opacity: number; blur: number };
-export type AppearanceDocument = {
-  version: 1;
-  revision: number;
-  preference: 'system' | 'light' | 'dark';
-  style: ThemeStyle;
-  modes: {
-    light: {
-      preset: ThemePreset;
-      primary?: string;
-      materials?: { header?: Partial<Material>; body?: Partial<Material> };
-    };
-    dark: {
-      preset: ThemePreset;
-      primary?: string;
-      materials?: { header?: Partial<Material>; body?: Partial<Material> };
-    };
-  };
-  wallpaper?:
-    | { kind: 'color'; color: string }
-    | { kind: 'image'; id: string; fit: 'cover' | 'contain'; x: number; y: number; fade: number };
-};
+export type ColorRole = keyof typeof palette.light;
 
 export const APPEARANCE_PRIMARY: Record<ThemePreset, { light: string; dark: string }> = {
   'classic-blue': { light: '#4176e6', dark: '#7aaaff' },
@@ -44,11 +27,17 @@ export type ColorScheme = 'light' | 'dark';
 export type Appearance = {
   scheme?: 'system' | ColorScheme;
   accent?: string;
+  style?: ThemeStyle;
+  preset?: ThemePreset;
+  primary?: string;
+  materialEnabled?: boolean;
+  materials?: ModeConfig['materials'];
 };
 
 export type DesignTheme = {
   scheme: ColorScheme;
   style: ThemeStyle;
+  glass: boolean;
   fontScale: number;
   largeText: boolean;
   color: Record<ColorRole, string>;
@@ -150,23 +139,69 @@ export function headerBand(scheme: ColorScheme, color: Record<ColorRole, string>
   };
 }
 
+type MaterialRecipe = { opacity: number; blur: number };
+const SOLID_MATERIAL: { header: MaterialRecipe; body: MaterialRecipe } = {
+  header: { opacity: 80, blur: 24 },
+  body: { opacity: 100, blur: 0 },
+};
+const GLASS_MATERIAL: Record<PlatformOS, { header: MaterialRecipe; body: MaterialRecipe }> = {
+  android: {
+    header: { opacity: 90, blur: 16 },
+    body: { opacity: 96, blur: 8 },
+  },
+  ios: {
+    header: { opacity: 64, blur: 28 },
+    body: { opacity: 82, blur: 20 },
+  },
+};
+
+function applyMaterial(
+  recipe: MaterialRecipe,
+  override: Partial<Material> | undefined,
+  color: string,
+): Material {
+  return {
+    color: override?.color ?? color,
+    opacity: override?.opacity ?? recipe.opacity,
+    blur: override?.blur ?? recipe.blur,
+  };
+}
+
+export function resolveMaterial(
+  color: Record<ColorRole, string>,
+  glass: boolean,
+  os: PlatformOS,
+  overrides: NonNullable<ModeConfig['materials']> = {},
+): { header: Material; body: Material } {
+  const recipe = glass ? GLASS_MATERIAL[os] : SOLID_MATERIAL;
+  return {
+    header: applyMaterial(recipe.header, overrides.header, color.surface),
+    body: applyMaterial(recipe.body, overrides.body, color.base),
+  };
+}
+
 export function resolveTheme(
   system: ColorScheme,
-  appearance: Appearance & { style?: ThemeStyle; preset?: ThemePreset; primary?: string } = {},
+  appearance: Appearance = {},
   os: PlatformOS = 'ios',
 ): DesignTheme {
   const scheme =
     appearance.scheme === undefined || appearance.scheme === 'system' ? system : appearance.scheme;
   const preset = appearance.preset ?? 'classic-blue';
-  const primary = appearance.accent ?? appearance.primary ?? APPEARANCE_PRIMARY[preset][scheme];
+  const supplied = appearance.accent;
+  const primary =
+    supplied !== undefined && HEX.test(supplied)
+      ? supplied
+      : (appearance.primary ?? APPEARANCE_PRIMARY[preset][scheme]);
   const color = withAccent({ ...palette[scheme] }, primary);
-  const material: { header: Material; body: Material } = {
-    header: { color: color.surface, opacity: 80, blur: 24 },
-    body: { color: color.base, opacity: 100, blur: 0 },
-  };
+  const style = appearance.style ?? 'default';
+  const glass = appearance.materialEnabled === true && (style === 'glass' || style === 'image');
+  const modeMaterials = appearance.materials;
+  const material = resolveMaterial(color, glass, os, modeMaterials);
   return {
     scheme,
-    style: appearance.style ?? 'default',
+    style,
+    glass,
     fontScale: 1,
     largeText: false,
     color,

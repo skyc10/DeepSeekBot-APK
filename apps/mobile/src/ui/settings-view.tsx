@@ -13,6 +13,10 @@ export interface SettingsActions {
   onAppIcon(): void;
   onNotifications(): void;
   onStorage(): void;
+  onHostSettings(): void;
+  onCredentials(): void;
+  onCloudConnections(): void;
+  onAppSetup(): void;
   onModels(): void;
   onCopyVersion(text: string): void;
 }
@@ -26,6 +30,7 @@ export function SettingsView({
   messageDisplay,
   sendJump,
   activityCount,
+  theme,
   chatBackground,
   routeSelector,
   hapticFeedback,
@@ -39,6 +44,7 @@ export function SettingsView({
   messageDisplay?: ReactNode;
   sendJump?: ReactNode;
   activityCount?: ReactNode;
+  theme?: ReactNode;
   chatBackground?: ReactNode;
   routeSelector?: ReactNode;
   hapticFeedback?: ReactNode;
@@ -79,6 +85,42 @@ export function SettingsView({
           disclosure
           onPress={actions.onStorage}
         />
+        <SettingsRow
+          on={SHEET_GROUP}
+          title={t.hostSettings.title}
+          icon="computer"
+          detail={t.hostSettings.hint}
+          disclosure
+          testID="settings-host-settings"
+          onPress={actions.onHostSettings}
+        />
+        <SettingsRow
+          on={SHEET_GROUP}
+          title={t.credentials.title}
+          icon="access"
+          detail={t.credentials.hint}
+          disclosure
+          testID="settings-credentials"
+          onPress={actions.onCredentials}
+        />
+        <SettingsRow
+          on={SHEET_GROUP}
+          title={t.cloudConnections.title}
+          icon="lan"
+          detail={t.cloudConnections.hint}
+          disclosure
+          testID="settings-cloud-connections"
+          onPress={actions.onCloudConnections}
+        />
+        <SettingsRow
+          on={SHEET_GROUP}
+          title={t.appSetup.title}
+          icon="account"
+          detail={t.appSetup.hint}
+          disclosure
+          testID="settings-app-setup"
+          onPress={actions.onAppSetup}
+        />
       </SettingsSection>
       <SettingsSection title={t.interface} on={SHEET_GROUP} footer={t.interfacePreferences.local}>
         <LanguageSetting on={SHEET_GROUP} />
@@ -93,6 +135,7 @@ export function SettingsView({
           onPress={actions.onAppIcon}
         />
         {activityCount}
+        {theme}
         {chatBackground}
         {hapticFeedback}
         {deliveryReceipts}
