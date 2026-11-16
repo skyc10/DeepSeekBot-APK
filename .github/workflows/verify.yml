@@ -103,7 +103,7 @@ jobs:
         env:
           # Snapshot evidence fixtures were restored from upstream at this commit;
           # PR-evidence policy for manual runs starts after the restore.
-          EVIDENCE_BASE: ${{ github.event.pull_request.base.sha || github.event.before || 'a9fab8ba' }}
+          EVIDENCE_BASE: ${{ github.event.pull_request.base.sha || github.event.before || 'a9fab8ba4e76d7699cc97fa3053234ea30c71273' }}
         run: |
           if [ -n "$EVIDENCE_BASE" ] && [ "$EVIDENCE_BASE" != "0000000000000000000000000000000000000000" ]; then
             git fetch --no-tags --depth=1 origin "$EVIDENCE_BASE"
