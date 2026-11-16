@@ -958,9 +958,9 @@ const en = {
     loadFailed: 'Could not load IM apps.',
     empty: 'No IM apps can be set up on this Host.',
     reload: 'Reload',
-    platform: (platform: 'feishu' | 'weixin') =>
+    platform: (platform: 'feishu' | 'weixin'): string =>
       platform === 'feishu' ? 'Feishu / Lark' : 'WeChat',
-    kind: (kind: 'credentials' | 'qr') =>
+    kind: (kind: 'credentials' | 'qr'): string =>
       kind === 'credentials' ? 'App credentials' : 'Scan a QR code',
     state: (state: string) => `Status: ${state}`,
     qr: 'Authorization QR code',
@@ -3536,7 +3536,8 @@ const zh: typeof en = {
     revision: (revision: number) => `版本 ${revision}`,
     valueLabel: '值（JSON）',
     invalidJson: '请输入合法的 JSON 对象。',
-    secretsHint: (count: number) => `有 ${count} 项凭据单独管理，此处不显示也不可修改。`,
+    secretsHint: (count: number) =>
+      `有 ${count} 项凭据单独管理，此处不显示也不可修改。`,
     save: '保存',
     saved: '已保存。',
     saveFailed: '保存失败，再试一次。',
@@ -3605,8 +3606,10 @@ const zh: typeof en = {
     loadFailed: '无法加载 IM 应用。',
     empty: '这台主机没有可授权的 IM 应用。',
     reload: '重新加载',
-    platform: (platform: 'feishu' | 'weixin') => (platform === 'feishu' ? '飞书 / Lark' : '微信'),
-    kind: (kind: 'credentials' | 'qr') => (kind === 'credentials' ? '填写应用凭据' : '扫码授权'),
+    platform: (platform: 'feishu' | 'weixin'): string =>
+      platform === 'feishu' ? '飞书 / Lark' : '微信',
+    kind: (kind: 'credentials' | 'qr'): string =>
+      kind === 'credentials' ? '填写应用凭据' : '扫码授权',
     state: (state: string) => `状态：${state}`,
     qr: '授权二维码',
     appId: '应用 ID',

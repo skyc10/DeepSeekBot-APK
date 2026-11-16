@@ -14,6 +14,8 @@ import { mono, touch, typeScale, weight, type PlatformOS } from './tokens';
 
 export type { AppearanceDocument, Material, ThemePreset, ThemeStyle } from '../appearance-model';
 
+export type ColorRole = keyof typeof palette.light;
+
 export const APPEARANCE_PRIMARY: Record<ThemePreset, { light: string; dark: string }> = {
   'classic-blue': { light: '#4176e6', dark: '#7aaaff' },
   'mist-purple': { light: '#7957c9', dark: '#b19af0' },

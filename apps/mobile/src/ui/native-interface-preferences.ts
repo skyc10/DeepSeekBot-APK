@@ -4,7 +4,10 @@ import { useSyncExternalStore } from 'react';
 import { AppState, Appearance } from 'react-native';
 
 import { interfacePreferences } from './interface-preferences';
-import { readAppearanceDocument, writeAppearanceDocument } from './appearance-document';
+import {
+  readAppearanceDocument,
+  writeAppearanceDocument,
+} from './appearance-document';
 import { appearanceStore } from './appearance-store';
 import { alertBanners } from '../host/alert-banners';
 

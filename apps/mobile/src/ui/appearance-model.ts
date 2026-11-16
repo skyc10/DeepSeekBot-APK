@@ -226,7 +226,11 @@ export function setMaterialEnabled(doc: AppearanceDocument, enabled: boolean): A
 }
 
 export function setGlass(doc: AppearanceDocument, enabled: boolean): AppearanceDocument {
-  const style: ThemeStyle = enabled ? (doc.style === 'default' ? 'glass' : doc.style) : 'default';
+  const style: ThemeStyle = enabled
+    ? doc.style === 'default'
+      ? 'glass'
+      : doc.style
+    : 'default';
   return { ...doc, materialEnabled: enabled, style, revision: doc.revision + 1 };
 }
 
