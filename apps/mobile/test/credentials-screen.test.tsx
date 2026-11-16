@@ -62,7 +62,9 @@ describe('Credentials screen is write-only', () => {
       DEEPSEEK_API_KEY: { configured: true, writable: true, masked: 'sk-•••42' },
     };
     const describe = vi.fn(async () => info);
-    const set = vi.fn(async () => ({ kind: 'saved' }) as CredentialWriteResult);
+    const set = vi.fn(
+      async () => ({ kind: 'saved' }) as CredentialWriteResult,
+    );
     const port: CredentialsPort = { describe, set, unset: vi.fn() };
     const view = await render(port);
 

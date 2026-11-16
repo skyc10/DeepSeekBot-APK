@@ -5,7 +5,6 @@ import type { ApprovalService } from '@deepseek-ai/dsh-user-approval';
 import type { ChannelToolApproval } from '../workspaces/tool-approval.js';
 import type { TobCliWriteProposal } from './cli-broker.js';
 import { TobError } from './service.js';
-import { toolApprovalRequired } from '../workspaces/tool-effects.js';
 
 export async function approveTobCliOperation(options: {
   execution: ToolExecution;
@@ -38,11 +37,7 @@ export async function approveTobCliOperation(options: {
       : 'global';
   authorize();
   if (!actor || signal.aborted) throw new TobError('agent-context-expired');
-  if (
-    !requireExplicitApproval &&
-    !toolApprovalRequired('deepseekbot ' + command, operation, false) &&
-    options.fullAccess()
-  )
+  if (!requireExplicitApproval && options.fullAccess())
     return () => {
       authorize();
       if (signal.aborted || !options.fullAccess()) throw new TobError('approval-authority-changed');

@@ -3,12 +3,20 @@ import {
   parseApprovalTemplateGuidance,
 } from '../workspaces/approval-template-guidance.js';
 import { readApprovalTemplateFile } from '../workspaces/approval-templates.js';
-export { APPROVAL_TEMPLATE_OPTIONS } from './cli-option-spec.js';
 
 import type { BotCreateCliIo } from './bot-create-cli.js';
 import { CliLiveError } from './cli-live-error.js';
 
 type Rpc = (method: string, payload: Record<string, unknown>) => Promise<unknown>;
+
+export const APPROVAL_TEMPLATE_OPTIONS = {
+  from: { type: 'string' },
+  blank: { type: 'boolean' },
+  'parts-file': { type: 'string' },
+  'apply-to': { type: 'string' },
+  'text-stdin': { type: 'boolean' },
+  'literal-template': { type: 'boolean' },
+} as const;
 
 export interface ApprovalTemplateValues {
   bot?: string;
@@ -19,8 +27,6 @@ export interface ApprovalTemplateValues {
   'apply-to'?: string;
   'text-stdin'?: boolean;
   'literal-template'?: boolean;
-  confirm?: boolean;
-  'delete-revision'?: string;
 }
 
 export const APPROVAL_TEMPLATE_COMMANDS = [
@@ -199,17 +205,8 @@ export async function runApprovalTemplateCommand(
     return apply(rpc, await rpc('approvalTemplateUpdate', { name, text }));
   }
   if (subcommand === 'delete') {
-    const revision = values['delete-revision'];
-    if (values.confirm === true && (revision === undefined || !/^[a-f0-9]{64}$/u.test(revision)))
-      usage(
-        'Preview approval-template delete first, then pass --confirm --delete-revision <revision>.',
-      );
-    if (values.confirm !== true && revision !== undefined)
-      usage('--delete-revision requires --confirm.');
     const rpc = await connect();
-    return values.confirm === true
-      ? rpc('approvalTemplateDelete', { name, confirmed: true, revision })
-      : rpc('approvalTemplateDeletePreview', { name });
+    return rpc('approvalTemplateDelete', { name });
   }
   const rpc = await connect();
   const bot = subcommand === 'list' ? values.bot?.trim() : undefined;

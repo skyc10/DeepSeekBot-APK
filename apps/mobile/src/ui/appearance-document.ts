@@ -37,7 +37,10 @@ export function appearanceFile() {
   return new File(Paths.document, FILE_NAME);
 }
 
-export function writeAppearanceDocument(doc: AppearanceDocument, expectedRevision?: number): void {
+export function writeAppearanceDocument(
+  doc: AppearanceDocument,
+  expectedRevision?: number,
+): void {
   const f = appearanceFile();
   if (expectedRevision !== undefined) {
     if (!f.exists) throw Error('appearance-revision-conflict');

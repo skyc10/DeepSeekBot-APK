@@ -8,7 +8,7 @@ import { UnreadCount } from './unread-count.js';
 import { HostLookSettings } from './host-look-settings.js';
 import { readQrImage } from './qr-image.js';
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives';
-import { openHostSettings } from './environment-settings-source.js';
+import { HostSettings } from './host-settings.js';
 import { ChannelSidebarIcon } from './channel-sidebar-icon.js';
 import { RemoteAvatar } from './remote-avatar.js';
 import { ConfirmDialog, FormDialog } from './ds/form-dialog.js';
@@ -223,6 +223,7 @@ export function HostTabs({ t }: { t: BotHarnessTranslate }): ReactElement | null
   const localLook = useHostLook(thisHost.id ?? THIS_HOST);
   const [menu, setMenu] = useState<{ hostId: string; point: MenuPoint } | undefined>(undefined);
   const [removing, setRemoving] = useState<RemoteHost | undefined>(undefined);
+  const [settings, setSettings] = useState<{ hostId: string; name: string; local: boolean }>();
   const proxy = useRef<HTMLSpanElement | null>(null);
 
   const thisId = thisHost.id ?? THIS_HOST;
@@ -293,17 +294,26 @@ export function HostTabs({ t }: { t: BotHarnessTranslate }): ReactElement | null
             onSelect={(id) => {
               setMenu(undefined);
               if (id === 'settings' && (menuRemote !== undefined || menu.hostId === thisId))
-                openHostSettings(
-                  menuRemote && {
-                    hostId: menuRemote.host.hostId,
-                    hostName: menuRemote.host.hostName,
-                  },
-                );
+                setSettings({
+                  hostId: menu.hostId,
+                  name: menuRemote?.host.hostName ?? thisHost.name ?? thisName,
+                  local: menuRemote === undefined,
+                });
               if (id === 'remove' && menuRemote !== undefined) setRemoving(menuRemote);
             }}
             onClose={() => setMenu(undefined)}
           />
         </span>
+      )}
+      {settings === undefined ? null : (
+        <HostSettings
+          key={settings.hostId}
+          hostId={settings.hostId}
+          name={settings.name}
+          local={settings.local}
+          onClose={() => setSettings(undefined)}
+          t={t}
+        />
       )}
       {removing === undefined ? null : (
         <ConfirmDialog

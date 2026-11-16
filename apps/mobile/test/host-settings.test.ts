@@ -47,9 +47,7 @@ describe('host settings transport', () => {
   it('describes settings with no arguments', async () => {
     const { client, calls } = clientHarness({ writable: true, hasDocument: false, namespaces: [] });
     await describeSettings(client);
-    expect(calls).toEqual([
-      { method: 'settings/describe', args: {}, via: undefined, opts: undefined },
-    ]);
+    expect(calls).toEqual([{ method: 'settings/describe', args: {}, via: undefined, opts: undefined }]);
   });
 
   it('writes a namespace with the optimistic revision fence', async () => {

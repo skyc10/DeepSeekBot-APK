@@ -1,4 +1,3 @@
-export { CALL_OPTIONS } from './cli-option-spec.js';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -23,6 +22,15 @@ export interface CallHost {
   readonly post: CallPost;
   readonly text: CallText;
 }
+
+export const CALL_OPTIONS = {
+  script: { type: 'string' },
+  'reply-wait': { type: 'string' },
+  video: { type: 'string' },
+  screen: { type: 'string' },
+  'share-ends-at': { type: 'string' },
+  'share-pause': { type: 'string' },
+} as const;
 
 export interface CallValues {
   file?: string;

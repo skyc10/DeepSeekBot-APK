@@ -37,7 +37,10 @@ export type AppSetupAttempt = {
   qrDataUrl?: string;
 };
 
-type SetupFailure = { kind: 'rejected'; message: string } | { kind: 'refused' } | { kind: 'error' };
+type SetupFailure =
+  | { kind: 'rejected'; message: string }
+  | { kind: 'refused' }
+  | { kind: 'error' };
 
 export type AppSetupResult = { kind: 'ok'; attempt: AppSetupAttempt } | SetupFailure;
 

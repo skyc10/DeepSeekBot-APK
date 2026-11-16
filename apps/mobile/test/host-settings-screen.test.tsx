@@ -19,11 +19,7 @@ vi.mock('react-native-worklets', () => ({
 }));
 vi.mock('../src/ui/haptics', () => ({ haptic: vi.fn() }));
 
-import type {
-  SettingsDescribe,
-  SettingsNamespace,
-  SettingsSaveResult,
-} from '../src/host/host-settings';
+import type { SettingsDescribe, SettingsNamespace, SettingsSaveResult } from '../src/host/host-settings';
 import { HostSettingsView, type HostSettingsPort } from '../src/ui/host-settings-screen';
 import { t } from '../src/ui/strings';
 
@@ -70,9 +66,7 @@ const described = (revision = 3): SettingsDescribe => ({
 
 describe('Host settings screen', () => {
   it('edits a namespace without exposing or writing credential-managed paths', async () => {
-    const save = vi.fn(
-      async () => ({ kind: 'saved', namespace: namespace(4) }) as SettingsSaveResult,
-    );
+    const save = vi.fn(async () => ({ kind: 'saved', namespace: namespace(4) }) as SettingsSaveResult);
     const port: HostSettingsPort = { describe: vi.fn(async () => described()), save };
     const view = await render(port);
 
@@ -91,9 +85,7 @@ describe('Host settings screen', () => {
       describeCalls += 1;
       return describeCalls === 1 ? described() : described(9);
     });
-    const save = vi.fn(
-      async () => ({ kind: 'conflict', expected: 3, actual: 9 }) as SettingsSaveResult,
-    );
+    const save = vi.fn(async () => ({ kind: 'conflict', expected: 3, actual: 9 }) as SettingsSaveResult);
     const port: HostSettingsPort = { describe, save };
     const view = await render(port);
 

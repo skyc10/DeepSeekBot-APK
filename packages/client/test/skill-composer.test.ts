@@ -23,7 +23,7 @@ vi.mock('@deepseek-ai/dsh-client-ui-primitives', () => ({
   ImageLightbox: () => null,
 }));
 
-import { ChannelComposer, type ComposerSkillOption } from '../src/client/channel-composer.js';
+import { ChannelComposer } from '../src/client/channel-composer.js';
 import { ComposerDraftStore } from '../src/client/composer-draft-store.js';
 import {
   readRichMentionDraft,
@@ -34,6 +34,7 @@ import {
   activeSkillQuery,
   rebaseSkills,
   selectSkill,
+  type ComposerSkillOption,
   type SelectedSkill,
 } from '../src/client/skill-refs.js';
 

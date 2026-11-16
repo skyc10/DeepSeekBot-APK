@@ -437,7 +437,6 @@ export function createTobChannelOperations(deps: {
       const lookup = () => owner(() => deps.management.lookupCreate(operationKey, input));
       if (lookup())
         return {
-          completed: true,
           run(guard) {
             guard();
             const replay = lookup();
@@ -473,7 +472,6 @@ export function createTobChannelOperations(deps: {
     const lookup = () => owner(() => deps.management.lookupInvite(operationKey, input));
     if (lookup())
       return {
-        completed: true,
         run(guard) {
           guard();
           const replay = lookup();

@@ -5,7 +5,11 @@ import { CliLiveError } from './cli-live-error.js';
 
 type Rpc = (method: string, payload: Record<string, unknown>) => Promise<unknown>;
 
-export { SKILL_OPTIONS } from './cli-option-spec.js';
+export const SKILL_OPTIONS = {
+  skill: { type: 'string', multiple: true },
+  owner: { type: 'string' },
+  confirm: { type: 'boolean' },
+} as const;
 
 export interface SkillValues {
   bot?: string;

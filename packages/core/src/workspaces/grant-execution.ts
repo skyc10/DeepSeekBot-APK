@@ -327,7 +327,6 @@ export function borrowedAgentDenial(
 }
 
 const BOT_TOOL_NAMES = new Set([
-  'deepseekbot_cli',
   'speaker_policy',
   'create_assignment',
   'list_assignment_models',

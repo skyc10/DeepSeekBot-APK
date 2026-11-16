@@ -78,12 +78,7 @@ describe('projectAttempt', () => {
   it('rejects malformed or inconsistent attempts', () => {
     expect(projectAttempt({ ...pendingAttempt, version: 2 })).toBeUndefined();
     expect(projectAttempt({ ...pendingAttempt, state: 'unknown' })).toBeUndefined();
-    expect(
-      projectAttempt({
-        ...readyAttempt,
-        description: { ...readyAttempt.description, botId: 'other' },
-      }),
-    ).toBeUndefined();
+    expect(projectAttempt({ ...readyAttempt, description: { ...readyAttempt.description, botId: 'other' } })).toBeUndefined();
     expect(projectAttempt('nope')).toBeUndefined();
   });
 });
@@ -91,27 +86,9 @@ describe('projectAttempt', () => {
 describe('app setup discovery', () => {
   it('keeps only qualified version-1 descriptors', async () => {
     const setups = [
-      {
-        version: 1,
-        platform: 'feishu',
-        providerId: 'dsh-im/feishu',
-        endpoint: 'dsh-im/app-setup',
-        kind: 'credentials',
-      },
-      {
-        version: 1,
-        platform: 'weixin',
-        providerId: 'dsh-im/weixin',
-        endpoint: 'dsh-im/app-setup',
-        kind: 'qr',
-      },
-      {
-        version: 2,
-        platform: 'feishu',
-        providerId: 'dsh-im/feishu',
-        endpoint: 'dsh-im/app-setup',
-        kind: 'credentials',
-      },
+      { version: 1, platform: 'feishu', providerId: 'dsh-im/feishu', endpoint: 'dsh-im/app-setup', kind: 'credentials' },
+      { version: 1, platform: 'weixin', providerId: 'dsh-im/weixin', endpoint: 'dsh-im/app-setup', kind: 'qr' },
+      { version: 2, platform: 'feishu', providerId: 'dsh-im/feishu', endpoint: 'dsh-im/app-setup', kind: 'credentials' },
     ];
     const { client } = harness({ setups });
     const result = await listAppSetups(client);
@@ -129,34 +106,17 @@ describe('app setup operations', () => {
     await verifyAppSetup(client, 'att_2', '123456');
     await cancelAppSetup(client, 'att_2');
     expect(calls).toEqual([
-      {
-        method: 'dsh-im/app-setup',
-        args: { method: 'setup.start', payload: { channel: 'feishu' } },
-      },
-      {
-        method: 'dsh-im/app-setup',
-        args: { method: 'setup.poll', payload: { attemptId: 'att_2' } },
-      },
+      { method: 'dsh-im/app-setup', args: { method: 'setup.start', payload: { channel: 'feishu' } } },
+      { method: 'dsh-im/app-setup', args: { method: 'setup.poll', payload: { attemptId: 'att_2' } } },
       {
         method: 'dsh-im/app-setup',
         args: {
           method: 'setup.credentials',
-          payload: {
-            attemptId: 'att_2',
-            appId: 'cli_1',
-            appSecret: 'app-secret',
-            domain: 'feishu',
-          },
+          payload: { attemptId: 'att_2', appId: 'cli_1', appSecret: 'app-secret', domain: 'feishu' },
         },
       },
-      {
-        method: 'dsh-im/app-setup',
-        args: { method: 'setup.verify', payload: { attemptId: 'att_2', verifyCode: '123456' } },
-      },
-      {
-        method: 'dsh-im/app-setup',
-        args: { method: 'setup.cancel', payload: { attemptId: 'att_2' } },
-      },
+      { method: 'dsh-im/app-setup', args: { method: 'setup.verify', payload: { attemptId: 'att_2', verifyCode: '123456' } } },
+      { method: 'dsh-im/app-setup', args: { method: 'setup.cancel', payload: { attemptId: 'att_2' } } },
     ]);
   });
 

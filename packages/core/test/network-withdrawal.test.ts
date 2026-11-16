@@ -49,24 +49,6 @@ it.skipIf(!aliases).each(['pending', 'started', 'alternate-network', 'connect-ro
     const notifications: Array<(change: TailnetChange) => void> = [];
     let eligible = true;
     let entered = 0;
-    let signalEntered: () => void = () => undefined;
-    const runEntered = new Promise<void>((resolve) => {
-      signalEntered = resolve;
-    });
-    const waitForEntered = async () => {
-      const core = cores[1]!;
-      await Promise.race([
-        runEntered,
-        core.runtime.whenIdle().then(() => {
-          if (entered === 0)
-            throw new Error(
-              'Orchestrator ended before the held fixture run entered: ' +
-                JSON.stringify(core.channels.readMessages('dm-bot')),
-            );
-        }),
-      ]);
-      expect(entered).toBe(1);
-    };
     let finished = false;
     let release!: () => void;
     const held = new Promise<void>((resolve) => {
@@ -91,7 +73,6 @@ it.skipIf(!aliases).each(['pending', 'started', 'alternate-network', 'connect-ro
       adapter.runOrchestrator = async () => {
         if (index !== 1) return;
         entered++;
-        signalEntered();
         await held;
         if (phase === 'started') {
           try {
@@ -196,7 +177,7 @@ it.skipIf(!aliases).each(['pending', 'started', 'alternate-network', 'connect-ro
       };
       if (phase !== 'started') {
         await appendHuman(1, 'LOCAL_WORK');
-        await waitForEntered();
+        await expect.poll(() => entered).toBe(1);
       }
       const root = await appendHuman(0, 'ROOT');
       const contacts = await cores[0]!.runtime.runDirectBotTool!(
@@ -214,7 +195,7 @@ it.skipIf(!aliases).each(['pending', 'started', 'alternate-network', 'connect-ro
         undefined,
         root,
       );
-      if (phase === 'started') await waitForEntered();
+      if (phase === 'started') await expect.poll(() => entered).toBe(1);
       expect(inbound()).toMatchObject({ ignored_at: null });
       if (phase === 'connect-route') {
         const peers: AuthenticatedConnectBotPeer[] = nodes.map((node, index) => ({

@@ -1,4 +1,3 @@
-export { WINDOW_ZOOM_OPTIONS } from './cli-option-spec.js';
 import { CliLiveError } from './cli-live-error.js';
 export const WINDOW_ZOOM_COMMANDS = [
   { command: 'window-zoom-clients', description: 'list active desktop window targets' },
@@ -30,7 +29,11 @@ const SETUP_ACTIONS: Record<string, string | undefined> = {
   'window-zoom-setup-disable': 'disable',
   'window-zoom-setup-cancel': 'cancel',
 };
-
+export const WINDOW_ZOOM_OPTIONS = {
+  'client-id': { type: 'string' },
+  'zoom-level': { type: 'string' },
+  'zoom-default': { type: 'boolean' },
+} as const;
 export async function runWindowZoomCommand(
   command: string,
   rest: string[],

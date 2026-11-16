@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { APPEARANCE_PRIMARY, resolveMaterial, resolveTheme } from '../src/ui/design/resolve-theme';
+import {
+  APPEARANCE_PRIMARY,
+  resolveMaterial,
+  resolveTheme,
+} from '../src/ui/design/resolve-theme';
 
 describe('resolveTheme - preset drives primary', () => {
   it('uses the preset primary for light and dark', () => {
@@ -24,6 +28,8 @@ describe('resolveTheme - preset drives primary', () => {
   });
 
   it('an invalid accent falls back to the preset primary, not the palette accent', () => {
+    // Regression: an invalid accent used to reach withAccent, which returned palette.accent
+    // (#3e70db) instead of the preset primary (#4176e6).
     expect(resolveTheme('light', { accent: 'red' }).color.accent).toBe(
       APPEARANCE_PRIMARY['classic-blue'].light,
     );
