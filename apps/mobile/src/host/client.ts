@@ -717,6 +717,7 @@ export function createHostClient(options: HostClientOptions): HostClient {
     method: string,
     args: Record<string, unknown> = {},
     via: string = route,
+    callOptions?: { raw?: boolean },
   ): Promise<T> =>
     withDeadline(async (signal) => {
       const name = method.includes('/') ? method : `botharness/${method}`;
@@ -725,11 +726,12 @@ export function createHostClient(options: HostClientOptions): HostClient {
           ? secretRouteRefusal(name)
           : undefined;
       if (refusal !== undefined) throw new MethodRefused(refusal.code, refusal.message);
+      const raw = callOptions?.raw === true || name.startsWith('dsh-im/');
       const request: ClientRequest = {
         type: 'client-request',
         rpcId: id(),
         method: name,
-        payload: { args },
+        payload: raw ? args : { args },
       };
       const response = await carrier.request(`${via}${DEVICE_PREFIX}/api/${name}`, {
         method: 'POST',
