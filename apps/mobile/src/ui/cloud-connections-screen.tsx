@@ -221,7 +221,11 @@ export function CloudConnectionsView({
           <Text accessibilityRole="alert" tone="danger">
             {message === '' ? copy.loadFailed : message}
           </Text>
-          <Button label={copy.reload} testID="cloud-connections-retry" onPress={() => void reload()} />
+          <Button
+            label={copy.reload}
+            testID="cloud-connections-retry"
+            onPress={() => void reload()}
+          />
         </View>
       ) : null}
       <Button
