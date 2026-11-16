@@ -6,6 +6,8 @@ import { layers, tint, type Layer, type LayerName } from './layers';
 import { palette } from './palette.generated';
 import { mono, touch, typeScale, weight, type PlatformOS } from './tokens';
 
+export type ColorRole = keyof typeof palette.light;
+
 export type ThemePreset = 'classic-blue' | 'mist-purple' | 'forest-green' | 'warm-amber';
 export type ThemeStyle = 'default' | 'glass' | 'image';
 export type Material = { color: string; opacity: number; blur: number };
