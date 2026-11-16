@@ -1,0 +1,621 @@
+import { watchInbox } from './cli-inbox-watch.js';
+import { CliLiveError } from './cli-live-error.js';
+
+export const INBOX_OPTIONS = {
+  notifications: { type: 'boolean' },
+  category: { type: 'string' },
+  'watch-seconds': { type: 'string' },
+  channel: { type: 'string' },
+  request: { type: 'string' },
+  sort: { type: 'string' },
+  search: { type: 'string' },
+  unread: { type: 'boolean' },
+  'source-key': { type: 'string' },
+  source: { type: 'string' },
+  section: { type: 'string' },
+  unsectioned: { type: 'boolean' },
+  index: { type: 'string' },
+  archived: { type: 'boolean' },
+  unarchived: { type: 'boolean' },
+  rule: { type: 'string' },
+  server: { type: 'string' },
+  confirm: { type: 'boolean' },
+  until: { type: 'string' },
+  snoozed: { type: 'boolean' },
+  dismissed: { type: 'boolean' },
+  activity: { type: 'string' },
+  'include-archived': { type: 'boolean' },
+} as const;
+
+export const INBOX_COMMANDS = [
+  {
+    command: 'grant-request-approve',
+    description: 'approve persistent read/write for one workspace request (needs --confirm)',
+  },
+  {
+    command: 'activity-watch',
+    description: 'observe live Activity changes for a bounded time and return one JSON snapshot',
+  },
+  { command: 'activity', description: 'list Activity items by category, Bot or Channel' },
+  { command: 'activity-status', description: 'read Activity unread count and action flag' },
+  { command: 'activity-dismiss', description: 'dismiss one Activity item' },
+  { command: 'activity-restore', description: 'bring back one dismissed Activity item' },
+  {
+    command: 'activity-dismiss-all',
+    description: 'dismiss every Activity item, or every item of one kind (needs --confirm)',
+  },
+  {
+    command: 'activity-allow-once',
+    description: 'allow one auto-rejected call once anyway, from its Activity item',
+  },
+  { command: 'activity-ignore', description: 'ignore an informational assignment report' },
+  {
+    command: 'activity-snooze',
+    description: 'hide one Activity item until a later time, or bring it back',
+  },
+  {
+    command: 'assignment-context',
+    description: "read an assignment report's context from Activity",
+  },
+  {
+    command: 'assignments',
+    description: "list or search a Bot's Assignments with their Title and Description",
+  },
+  { command: 'assignment', description: "inspect one of a Bot's Assignments" },
+  {
+    command: 'assignment-timeline',
+    description: "read an Assignment's MAIN and SUBAGENT timeline (public summaries only)",
+  },
+  {
+    command: 'session-subagents',
+    description:
+      'read the DSH Subagents an Orchestrator or Assignment Session started, with model and state',
+  },
+  { command: 'channel-assignments', description: "list a group Channel's assignment work" },
+  { command: 'channel-assign', description: 'move a Channel into a sidebar section or out of it' },
+  { command: 'session-ids', description: 'list the root Session IDs owned by Bots' },
+  { command: 'session-owner', description: 'read which Bot owns a Session, and in which role' },
+  {
+    command: 'session-stop',
+    description:
+      "stop one of a Bot's running Sessions (its Orchestrator or one Assignment); its other Sessions keep running",
+  },
+  {
+    command: 'bot-stop',
+    description:
+      'stop every running Session of one Bot; its Orchestrator stays quiet until a Human writes to it',
+  },
+  {
+    command: 'session-archive-set',
+    description: "archive or unarchive a Bot's assignment Session",
+  },
+  { command: 'tool-approval-rules', description: "list a Bot's always-allow tool approval rules" },
+  {
+    command: 'tool-approval-history',
+    description: "list the Human's answers to a Bot's tool approval requests, newest first",
+  },
+  {
+    command: 'tool-approval-rule-revoke',
+    description: 'revoke an always-allow tool approval rule (needs --confirm)',
+  },
+  {
+    command: 'private-mcp-set',
+    description: "turn a Bot's private MCP server on or off",
+  },
+  {
+    command: 'private-mcp-remove',
+    description: "remove a Bot's private MCP server (needs --confirm)",
+  },
+] as const;
+
+export const INBOX_HOST_COMMANDS = ['grant-revoke', 'grant-write-set'] as const;
+
+export interface InboxValues {
+  notifications?: boolean;
+  category?: string;
+  'watch-seconds'?: string;
+  kind?: string;
+  channel?: string;
+  bot?: string;
+  sort?: string;
+  search?: string;
+  unread?: boolean;
+  limit?: string;
+  cursor?: string;
+  session?: string;
+  'source-key'?: string;
+  source?: string;
+  request?: string;
+  workspace?: string;
+  section?: string;
+  unsectioned?: boolean;
+  index?: string;
+  archived?: boolean;
+  unarchived?: boolean;
+  rule?: string;
+  grant?: string;
+  server?: string;
+  enabled?: boolean;
+  disabled?: boolean;
+  confirm?: boolean;
+  until?: string;
+  clear?: boolean;
+  snoozed?: boolean;
+  dismissed?: boolean;
+  activity?: string;
+  'include-archived'?: boolean;
+}
+
+type Rpc = <T>(method: string, args: Record<string, unknown>) => Promise<T>;
+
+const CATEGORIES = ['action', 'info', 'unread', 'replies', 'handled'];
+const ASSIGNMENT_ACTIVITIES = ['working', 'idle', 'error', 'stopping', 'stopped'];
+
+function usage(message: string): never {
+  throw new CliLiveError('usage', message);
+}
+
+const ACTIVITY_COMMAND_NAMES: Readonly<Record<string, string>> = {
+  activity: 'inbox',
+  'activity-watch': 'inbox-watch',
+  'activity-status': 'inbox-status',
+  'activity-dismiss': 'inbox-dismiss',
+  'activity-restore': 'inbox-restore',
+  'activity-dismiss-all': 'inbox-dismiss-all',
+  'activity-allow-once': 'inbox-allow-once',
+  'activity-ignore': 'inbox-ignore',
+  'activity-snooze': 'inbox-snooze',
+};
+const LEGACY_INBOX_COMMANDS: ReadonlySet<string> = new Set(Object.values(ACTIVITY_COMMAND_NAMES));
+
+export function isActivityCommandName(command: string): boolean {
+  return LEGACY_INBOX_COMMANDS.has(command) || ACTIVITY_COMMAND_NAMES[command] !== undefined;
+}
+
+function inboxCommandName(command: string): string {
+  return ACTIVITY_COMMAND_NAMES[command] ?? command;
+}
+
+export function isInboxCommand(command: string): boolean {
+  return (
+    LEGACY_INBOX_COMMANDS.has(command) ||
+    INBOX_COMMANDS.some((entry) => entry.command === command) ||
+    INBOX_HOST_COMMANDS.some((entry) => entry === command)
+  );
+}
+
+function positionals(command: string, rest: string[], count: number, name: string): string[] {
+  if (rest.length !== count || rest.some((value) => !value.trim()))
+    usage(count === 0 ? `${command} takes no positional arguments.` : `${command} needs ${name}.`);
+  return rest.map((value) => value.trim());
+}
+
+function required(value: string | undefined, flag: string, command: string): string {
+  const next = value?.trim();
+  if (!next) usage(`${command} requires --${flag}.`);
+  return next;
+}
+
+function toggle(
+  command: string,
+  on: boolean | undefined,
+  off: boolean | undefined,
+  flags: [string, string],
+): boolean {
+  if ((on === true) === (off === true))
+    usage(`${command} needs --${flags[0]} or --${flags[1]}, not both or neither.`);
+  return on === true;
+}
+
+function confirmed(command: string, values: InboxValues): void {
+  if (values.confirm !== true)
+    usage(`${command} is destructive; repeat it with --confirm, as the Web UI asks you to.`);
+}
+
+export async function runInboxCommand(
+  name: string,
+  rest: string[],
+  values: InboxValues,
+  connect: () => Promise<{ rpc: Rpc; stream?: (path: string) => Promise<Response> }>,
+): Promise<unknown> {
+  const command = inboxCommandName(name);
+  if (command === 'inbox-watch' && values.notifications)
+    usage('Use activity --notifications with its returned cursor.');
+  const call = prepare(command === 'inbox-watch' ? 'inbox' : command, rest, values);
+  if (command === 'inbox-watch') {
+    const seconds = Number(values['watch-seconds'] ?? 10);
+    if (!Number.isInteger(seconds) || seconds < 1 || seconds > 60)
+      usage('--watch-seconds must be 1–60.');
+    const host = await connect();
+    if (!host.stream)
+      throw new CliLiveError(
+        'host-query-unsupported',
+        'This connection cannot watch live inbox changes.',
+      );
+    return watchInbox(
+      host.stream,
+      async () => {
+        const result = await host.rpc<Record<string, unknown>>(call.method, call.args);
+        if (call.args['queryVersion'] === 1 && result['queryVersion'] !== 1)
+          throw new CliLiveError(
+            'host-query-unsupported',
+            'Update the Host to use Activity query filters.',
+          );
+        return result;
+      },
+      seconds,
+    );
+  }
+  const { rpc } = await connect();
+  const result = await rpc<Record<string, unknown>>(call.method, call.args);
+  if (call.args['notifications'] === true && result['notificationVersion'] !== 1)
+    throw new CliLiveError(
+      'host-query-unsupported',
+      'Update the Host to discover notification attention.',
+    );
+  if (call.args['dismissed'] === true && result['dismissed'] !== true)
+    throw new CliLiveError('host-query-unsupported', 'Update the Host to list dismissed items.');
+  if (call.args['queryVersion'] === 1 && result['queryVersion'] !== 1)
+    throw new CliLiveError(
+      'host-query-unsupported',
+      'Update the Host to use Activity search, unread filtering and mention ordering.',
+    );
+  if (call.method === 'privateMcpServerEnable' && result['accepted'] !== true)
+    throw new CliLiveError(
+      'private-mcp-server-unavailable',
+      'The Host did not change this private MCP server; check its name with ask-secret-accounts.',
+    );
+  if (call.method === 'privateMcpServerRemove' && result['removed'] !== true)
+    throw new CliLiveError(
+      'private-mcp-server-unavailable',
+      'The Host has no such private MCP server for this Bot; check ask-secret-accounts.',
+    );
+  if (call.method === 'channelAssign')
+    return { channelId: call.args['channelId'], sectionId: call.args['sectionId'] };
+  return result;
+}
+
+function prepare(
+  command: string,
+  rest: string[],
+  values: InboxValues,
+): { method: string; args: Record<string, unknown> } {
+  switch (command) {
+    case 'inbox': {
+      positionals(command, rest, 0, '');
+      if (values.category !== undefined && !CATEGORIES.includes(values.category))
+        usage(`--category must be one of ${CATEGORIES.join(', ')}.`);
+      if (
+        values.sort !== undefined &&
+        values.sort !== 'newest' &&
+        values.sort !== 'oldest' &&
+        !(values.sort === 'mentions-first' && values.category === 'replies')
+      )
+        usage('--sort must be newest, oldest, or mentions-first with --category replies.');
+      if (values.search !== undefined && values.search.length > 200)
+        usage('--search must be at most 200 characters.');
+      if (values.kind !== undefined && values.kind !== 'auto-rejection')
+        usage('--kind must be auto-rejection.');
+      if (values.snoozed === true && values.dismissed === true)
+        usage('activity takes --snoozed or --dismissed, not both.');
+      const limit = values.limit === undefined ? undefined : Number(values.limit);
+      if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1 || limit > 100))
+        usage('--limit must be 1–100.');
+      if (values.notifications) {
+        if (
+          [
+            values.category,
+            values.bot,
+            values.channel,
+            values.sort,
+            values.search,
+            values.kind,
+          ].some((value) => value !== undefined) ||
+          values.unread ||
+          values.snoozed ||
+          values.dismissed
+        )
+          usage('--notifications only accepts --limit and --cursor.');
+        return {
+          method: 'humanAttention',
+          args: {
+            notifications: true,
+            ...(limit === undefined ? {} : { limit }),
+            ...(values.cursor === undefined ? {} : { cursor: values.cursor }),
+          },
+        };
+      }
+      return {
+        method: 'humanAttention',
+        args: {
+          ...(values.category === undefined ? {} : { category: values.category }),
+          ...(values.bot === undefined ? {} : { botSlug: required(values.bot, 'bot', command) }),
+          ...(values.channel === undefined
+            ? {}
+            : { channelId: required(values.channel, 'channel', command) }),
+          ...(limit === undefined ? {} : { limit }),
+          ...(values.cursor === undefined ? {} : { cursor: values.cursor }),
+          ...(values.sort === undefined ? {} : { sort: values.sort }),
+          ...(values.search === undefined ? {} : { search: values.search }),
+          ...(values.search !== undefined || values.unread || values.sort === 'mentions-first'
+            ? { queryVersion: 1 }
+            : {}),
+          ...(values.unread ? { unreadOnly: true } : {}),
+          ...(values.snoozed === true ? { snoozed: true } : {}),
+          ...(values.dismissed === true ? { dismissed: true } : {}),
+          ...(values.kind === undefined ? {} : { kind: values.kind }),
+        },
+      };
+    }
+    case 'inbox-allow-once': {
+      const [itemId] = positionals(command, rest, 1, 'exactly one auto-rejection item id');
+      if (!itemId!.startsWith('autoreject:'))
+        usage('activity-allow-once takes an auto-rejection item id (autoreject:…).');
+      return { method: 'toolAutoRejectionOverride', args: { itemId } };
+    }
+    case 'inbox-status':
+      positionals(command, rest, 0, '');
+      return { method: 'humanAttentionStatus', args: { messageCounts: true } };
+    case 'inbox-dismiss': {
+      const [itemId] = positionals(command, rest, 1, 'exactly one inbox item id');
+      return {
+        method: 'humanAttentionDismiss',
+        args: { itemId, sourceKey: values['source-key']?.trim() ?? '' },
+      };
+    }
+    case 'inbox-dismiss-all': {
+      positionals(command, rest, 0, '');
+      if (values.confirm !== true)
+        usage('activity-dismiss-all clears many items at once; pass --confirm.');
+      if (
+        values.category !== undefined &&
+        !['action', 'info', 'unread', 'replies'].includes(values.category)
+      )
+        usage('--category must be one of action, info, unread, replies.');
+      return {
+        method: 'humanAttentionDismissAll',
+        args: {
+          ...(values.kind === undefined ? {} : { kind: required(values.kind, 'kind', command) }),
+          ...(values.category === undefined ? {} : { category: values.category }),
+          ...(values.bot === undefined ? {} : { botSlug: required(values.bot, 'bot', command) }),
+          ...(values.channel === undefined
+            ? {}
+            : { channelId: required(values.channel, 'channel', command) }),
+        },
+      };
+    }
+    case 'inbox-restore': {
+      const [itemId] = positionals(command, rest, 1, 'exactly one inbox item id');
+      return {
+        method: 'humanAttentionRestore',
+        args: { itemId, sourceKey: values['source-key']?.trim() ?? '' },
+      };
+    }
+    case 'inbox-snooze': {
+      const [itemId] = positionals(command, rest, 1, 'exactly one inbox item id');
+      if ((values.until !== undefined) === (values.clear === true))
+        usage('activity-snooze needs --until <ISO time> or --clear, not both or neither.');
+      let until: string | null = null;
+      if (values.until !== undefined) {
+        const at = Date.parse(values.until.trim());
+        if (Number.isNaN(at)) usage('--until must be an ISO time such as 2026-10-15T09:00:00Z.');
+        until = new Date(at).toISOString();
+      }
+      return {
+        method: 'humanAttentionSnooze',
+        args: { itemId, sourceKey: values['source-key']?.trim() ?? '', until },
+      };
+    }
+    case 'inbox-ignore': {
+      const [sourceEventId] = positionals(command, rest, 1, 'exactly one report Source Event id');
+      return { method: 'humanAttentionIgnore', args: { sourceEventId } };
+    }
+    case 'assignment-context': {
+      const [slug] = positionals(command, rest, 1, 'exactly one bot id');
+      return {
+        method: 'humanAssignmentContext',
+        args: {
+          slug,
+          sessionId: required(values.session, 'session', command),
+          sourceEventId: required(values.source, 'source', command),
+        },
+      };
+    }
+    case 'assignments': {
+      const [slug] = positionals(command, rest, 1, 'exactly one bot id');
+      const activity = values.activity
+        ?.split(',')
+        .map((value) => value.trim())
+        .filter((value) => value !== '');
+      if (activity?.some((value) => !ASSIGNMENT_ACTIVITIES.includes(value)))
+        usage(`--activity takes a comma list of ${ASSIGNMENT_ACTIVITIES.join(', ')}.`);
+      const limit = values.limit === undefined ? undefined : Number(values.limit);
+      if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > 50))
+        usage('--limit must be an integer from 1 to 50.');
+      const query = values.search?.trim();
+      return {
+        method: 'assignments',
+        args: {
+          slug,
+          ...(query ? { query } : {}),
+          ...(activity === undefined || activity.length === 0 ? {} : { activity }),
+          ...(values['include-archived'] === true ? { includeArchived: true } : {}),
+          ...(limit === undefined ? { limit: 20 } : { limit }),
+          ...(values.cursor === undefined
+            ? {}
+            : { cursor: required(values.cursor, 'cursor', command) }),
+        },
+      };
+    }
+    case 'assignment': {
+      const [slug] = positionals(command, rest, 1, 'exactly one bot id');
+      return {
+        method: 'assignment',
+        args: { slug, sessionId: required(values.session, 'session', command) },
+      };
+    }
+    case 'assignment-timeline': {
+      const [slug] = positionals(command, rest, 1, 'exactly one bot id');
+      return {
+        method: 'assignmentTimeline',
+        args: { slug, sessionId: required(values.session, 'session', command) },
+      };
+    }
+    case 'session-subagents': {
+      const [slug] = positionals(command, rest, 1, 'exactly one bot id');
+      return {
+        method: 'sessionSubagents',
+        args: { slug, sessionId: required(values.session, 'session', command) },
+      };
+    }
+    case 'channel-assignments': {
+      const [channelId] = positionals(command, rest, 1, 'exactly one group channel id');
+      return { method: 'channelAssignments', args: { channelId } };
+    }
+    case 'channel-assign': {
+      const [channelId] = positionals(command, rest, 1, 'exactly one channel id');
+      if ((values.section !== undefined) === (values.unsectioned === true))
+        usage('channel-assign needs --section <id> or --unsectioned, not both or neither.');
+      const index = values.index === undefined ? undefined : Number(values.index);
+      if (index !== undefined && (!Number.isSafeInteger(index) || index < 0))
+        usage('--index must be a nonnegative integer.');
+      return {
+        method: 'channelAssign',
+        args: {
+          channelId,
+          sectionId:
+            values.section === undefined ? null : required(values.section, 'section', command),
+          ...(index === undefined ? {} : { index }),
+        },
+      };
+    }
+    case 'session-ids':
+      positionals(command, rest, 0, '');
+      return { method: 'botSessionIds', args: {} };
+    case 'session-owner': {
+      const [sessionId] = positionals(command, rest, 1, 'exactly one session id');
+      return { method: 'sessionOwner', args: { sessionId } };
+    }
+    case 'session-stop': {
+      const activityId =
+        values.activity === undefined ? undefined : required(values.activity, 'activity', command);
+      const [botSlug, sessionId] = positionals(
+        command,
+        rest,
+        activityId === undefined ? 2 : 1,
+        activityId === undefined
+          ? 'a bot id and one of its Session ids'
+          : 'a bot id, with --activity naming the running Session',
+      );
+      return {
+        method: 'sessionStop',
+        args: {
+          botSlug,
+          ...(activityId === undefined ? { sessionId } : { activityId }),
+          ...(values.channel === undefined
+            ? {}
+            : { channelId: required(values.channel, 'channel', command) }),
+        },
+      };
+    }
+    case 'bot-stop': {
+      const [botSlug] = positionals(command, rest, 1, 'exactly one bot id');
+      return {
+        method: 'botStop',
+        args: {
+          botSlug,
+          ...(values.channel === undefined
+            ? {}
+            : { channelId: required(values.channel, 'channel', command) }),
+        },
+      };
+    }
+    case 'session-archive-set': {
+      const [slug] = positionals(command, rest, 1, 'exactly one bot id');
+      return {
+        method: 'sessionArchiveSet',
+        args: {
+          slug,
+          sessionId: required(values.session, 'session', command),
+          archived: toggle(command, values.archived, values.unarchived, ['archived', 'unarchived']),
+        },
+      };
+    }
+    case 'tool-approval-rules': {
+      const [slug] = positionals(command, rest, 1, 'exactly one bot id');
+      return { method: 'toolApprovalRules', args: { slug } };
+    }
+    case 'tool-approval-history': {
+      const [slug] = positionals(command, rest, 1, 'exactly one bot id');
+      const limit = values.limit === undefined ? undefined : Number(values.limit);
+      if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1 || limit > 100))
+        usage('--limit must be 1–100.');
+      return {
+        method: 'toolApprovalHistory',
+        args: {
+          slug,
+          ...(limit === undefined ? {} : { limit }),
+          ...(values.cursor === undefined
+            ? {}
+            : { cursor: required(values.cursor, 'cursor', command) }),
+        },
+      };
+    }
+    case 'tool-approval-rule-revoke': {
+      const [slug] = positionals(command, rest, 1, 'exactly one bot id');
+      const id = required(values.rule, 'rule', command);
+      confirmed(command, values);
+      return { method: 'toolApprovalRuleRevoke', args: { slug, id } };
+    }
+    case 'grant-revoke': {
+      const [slug] = positionals(command, rest, 1, 'exactly one bot id');
+      const grantId = required(values.grant, 'grant', command);
+      confirmed(command, values);
+      return { method: 'grantRevoke', args: { slug, grantId } };
+    }
+    case 'grant-request-approve': {
+      const [slug] = positionals(command, rest, 1, 'exactly one bot id');
+      confirmed(command, values);
+      return {
+        method: 'grantRequestApprove',
+        args: {
+          slug,
+          channelId: required(values.channel, 'channel', command),
+          requestMessageId: required(values.request, 'request', command),
+          workspaceId: required(values.workspace, 'workspace', command),
+          acknowledgeReadWrite: true,
+        },
+      };
+    }
+    case 'grant-write-set': {
+      const [slug] = positionals(command, rest, 1, 'exactly one bot id');
+      return {
+        method: 'grantWriteSet',
+        args: {
+          slug,
+          grantId: required(values.grant, 'grant', command),
+          enabled: toggle(command, values.enabled, values.disabled, ['enabled', 'disabled']),
+        },
+      };
+    }
+    case 'private-mcp-set': {
+      const [slug] = positionals(command, rest, 1, 'exactly one bot id');
+      return {
+        method: 'privateMcpServerEnable',
+        args: {
+          slug,
+          serverName: required(values.server, 'server', command),
+          enabled: toggle(command, values.enabled, values.disabled, ['enabled', 'disabled']),
+        },
+      };
+    }
+    case 'private-mcp-remove': {
+      const [slug] = positionals(command, rest, 1, 'exactly one bot id');
+      const serverName = required(values.server, 'server', command);
+      confirmed(command, values);
+      return { method: 'privateMcpServerRemove', args: { slug, serverName } };
+    }
+    default:
+      usage(`Unsupported inbox command ${command}.`);
+  }
+}

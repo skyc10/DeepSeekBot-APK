@@ -1,0 +1,22 @@
+sequenceDiagram
+  participant P as Provider adapter
+  participant M as Messaging command
+  participant DB as botharness.db
+  participant N as Post-commit notifier
+  participant O as Orchestrator
+  participant X as Provider service
+
+  P->>M: verified event + account fingerprint + capabilities
+  M->>DB: BEGIN IMMEDIATE
+  M->>DB: append Source Event / Revision
+  M->>DB: Channel placement (optional)
+  M->>DB: evaluate exact Trigger + Wake Policy revision
+  M->>DB: create Inbox Admission / Attention facts
+  M->>DB: COMMIT
+  DB-->>N: committed fact ids
+  N-->>O: wake at policy-selected safe boundary
+  O->>M: Reply or authorized Service Action
+  M->>DB: validate current revision + capability + grant and write Outbox Intent
+  M->>X: execute with stable idempotency identity
+  X-->>M: receipt / failure / unknown outcome
+  M->>DB: append attempt and outcome facts

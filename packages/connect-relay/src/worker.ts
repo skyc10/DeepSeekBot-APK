@@ -1,0 +1,192 @@
+import { createActivityApns } from './activity-apns.js';
+import { createAccessTokenVerifier, workosKeys } from './auth.js';
+import { createCloudflareApi, parseZones } from './cloudflare.js';
+import type { D1Database } from './d1.js';
+import { createEmailCode } from './email-code.js';
+import { createPasswordAuth } from './password-auth.js';
+import { createRelay, hmac } from './relay.js';
+
+export interface ConnectRelayEnv {
+  ACTIVITY_APNS_TEAM_ID?: string;
+  ACTIVITY_APNS_KEY_ID?: string;
+  ACTIVITY_APNS_PRIVATE_KEY?: string;
+  ACTIVITY_APNS_BUNDLE_IDENTIFIER?: string;
+  ACTIVITY_APNS_ENVIRONMENT?: string;
+  CONNECT_DB: D1Database;
+  WORKOS_CLIENT_ID?: string;
+  CLOUDFLARE_API_TOKEN?: string;
+  CLOUDFLARE_ACCOUNT_ID?: string;
+  CLOUDFLARE_ZONE_ID?: string;
+  CONNECT_ZONE?: string;
+  CONNECT_ZONES?: string;
+  ZONE_RECORDS?: string;
+  RECLAIM_BUDGET?: string;
+  TUNNEL_PREFIX?: string;
+  EVICT_PROTECT_MINUTES?: string;
+  EVICT_FRESH_MINUTES?: string;
+  ALLOWED_USERS?: string;
+  MAX_HOSTS?: string;
+  MAX_TUNNELS?: string;
+  CONNECT_LIMIT?: { limit(options: { key: string }): Promise<{ success: boolean }> };
+  CONNECT_READ_LIMIT?: { limit(options: { key: string }): Promise<{ success: boolean }> };
+  RECLAIM_AFTER_MINUTES?: string;
+  CONNECT_HOST_KEY?: string;
+  WORKOS_API_KEY?: string;
+  PASSWORD_AUTH_ENABLED?: string;
+  MARKET?: { fetch: typeof fetch };
+}
+
+export const MARKETPLACE_ORIGIN = 'https://market.botharness.ai';
+
+export function marketplaceAuthorDeleter(fetcher: typeof fetch) {
+  return async (accessToken: string): Promise<void> => {
+    const response = await fetcher(`${MARKETPLACE_ORIGIN}/v1/me`, {
+      method: 'DELETE',
+      headers: { authorization: `Bearer ${accessToken}` },
+    });
+    if (!response.ok) throw new Error(`marketplace ${response.status}`);
+  };
+}
+
+export function workosUserDeleter(apiKey: string, fetcher: typeof fetch = fetch) {
+  return async (account: string): Promise<void> => {
+    const response = await fetcher(
+      `https://api.workos.com/user_management/users/${encodeURIComponent(account)}`,
+      { method: 'DELETE', headers: { authorization: `Bearer ${apiKey}` } },
+    );
+    if (!response.ok && response.status !== 404) throw new Error(`workos ${response.status}`);
+  };
+}
+
+export function workosSessionRevoker(apiKey: string, fetcher: typeof fetch = fetch) {
+  return async (sessionId: string): Promise<void> => {
+    const response = await fetcher('https://api.workos.com/user_management/sessions/revoke', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok && response.status !== 404) throw new Error(`workos ${response.status}`);
+  };
+}
+
+function positive(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+let cached: { env: ConnectRelayEnv; relay: ReturnType<typeof createRelay> } | undefined;
+
+export function relayForEnv(env: ConnectRelayEnv): ReturnType<typeof createRelay> | undefined {
+  if (cached?.env === env) return cached.relay;
+  const clientId = env.WORKOS_CLIENT_ID;
+  const token = env.CLOUDFLARE_API_TOKEN;
+  const accountId = env.CLOUDFLARE_ACCOUNT_ID;
+  const zoneId = env.CLOUDFLARE_ZONE_ID;
+  if (!clientId || !token || !accountId || !zoneId) return undefined;
+  const zone = (env.CONNECT_ZONE ?? 'deepseekbot.dev').toLowerCase();
+  const zones = [
+    { name: zone, id: zoneId.toLowerCase() },
+    ...parseZones(env.CONNECT_ZONES).filter((extra) => extra.name !== zone),
+  ];
+  const hostSecret = env.CONNECT_HOST_KEY;
+  const limiter = env.CONNECT_LIMIT;
+  const readLimiter = env.CONNECT_READ_LIMIT;
+  const apiKey = env.WORKOS_API_KEY;
+  const relay = createRelay({
+    db: env.CONNECT_DB,
+    activitySender: createActivityApns({
+      ...(env.ACTIVITY_APNS_TEAM_ID ? { teamId: env.ACTIVITY_APNS_TEAM_ID } : {}),
+      ...(env.ACTIVITY_APNS_KEY_ID ? { keyId: env.ACTIVITY_APNS_KEY_ID } : {}),
+      ...(env.ACTIVITY_APNS_PRIVATE_KEY ? { privateKey: env.ACTIVITY_APNS_PRIVATE_KEY } : {}),
+      ...(env.ACTIVITY_APNS_BUNDLE_IDENTIFIER
+        ? { bundleIdentifier: env.ACTIVITY_APNS_BUNDLE_IDENTIFIER }
+        : {}),
+      ...(env.ACTIVITY_APNS_ENVIRONMENT ? { environment: env.ACTIVITY_APNS_ENVIRONMENT } : {}),
+    }),
+    verifier: createAccessTokenVerifier({ clientId, keys: workosKeys(clientId) }),
+    tunnels: createCloudflareApi({ token, accountId, zones }),
+    clientId,
+    zone,
+    zones: zones.map((entry) => entry.name),
+    zoneRecords: positive(env.ZONE_RECORDS, 195),
+    zoneLimits: Object.fromEntries(
+      zones.flatMap((entry) =>
+        'records' in entry && entry.records !== undefined ? [[entry.name, entry.records]] : [],
+      ),
+    ),
+    reclaimBudget: positive(env.RECLAIM_BUDGET, 30),
+    ...(env.TUNNEL_PREFIX && /^[a-z0-9-]{2,20}$/u.test(env.TUNNEL_PREFIX)
+      ? { tunnelPrefix: env.TUNNEL_PREFIX }
+      : {}),
+    evictProtectMs: positive(env.EVICT_PROTECT_MINUTES, 30) * 60 * 1000,
+    evictFreshMs: positive(env.EVICT_FRESH_MINUTES, 30) * 60 * 1000,
+    allowedUsers: (env.ALLOWED_USERS ?? '')
+      .split(',')
+      .map((user) => user.trim())
+      .filter(Boolean),
+    maxHosts: positive(env.MAX_HOSTS, 3),
+    maxTunnels: positive(env.MAX_TUNNELS, 980),
+    reclaimAfterMs: positive(env.RECLAIM_AFTER_MINUTES, 5) * 60 * 1000,
+    ...(limiter === undefined
+      ? {}
+      : {
+          limit: async (account: string) => (await limiter.limit({ key: account })).success,
+          limitBot: async (account: string, hostId: string) =>
+            (await limiter.limit({ key: JSON.stringify(['bot-network', account, hostId]) }))
+              .success,
+        }),
+    ...(readLimiter === undefined
+      ? {}
+      : {
+          limitRead: async (account: string) => (await readLimiter.limit({ key: account })).success,
+        }),
+    ...(apiKey
+      ? { deleteUser: workosUserDeleter(apiKey), revokeSession: workosSessionRevoker(apiKey) }
+      : {}),
+    ...(apiKey && limiter !== undefined
+      ? {
+          emailCode: createEmailCode({
+            apiKey,
+            clientId,
+            limit: async (key: string) => (await limiter.limit({ key })).success,
+          }),
+        }
+      : {}),
+    ...(apiKey && limiter !== undefined && env.PASSWORD_AUTH_ENABLED === 'true'
+      ? {
+          passwordAuth: createPasswordAuth({
+            apiKey,
+            clientId,
+            limit: async (key) => (await limiter.limit({ key })).success,
+          }),
+        }
+      : {}),
+    deleteMarketplaceAuthor: marketplaceAuthorDeleter(
+      env.MARKET === undefined ? fetch : env.MARKET.fetch.bind(env.MARKET),
+    ),
+    ...(hostSecret ? { hostKey: (hostId: string) => hmac(hostSecret, `host:${hostId}`) } : {}),
+  });
+  cached = { env, relay };
+  return relay;
+}
+
+export default {
+  async fetch(request: Request, env: ConnectRelayEnv): Promise<Response> {
+    const relay = relayForEnv(env);
+    if (relay === undefined)
+      return new Response(JSON.stringify({ error: { code: 'relay-unconfigured' } }), {
+        status: 503,
+        headers: { 'content-type': 'application/json; charset=utf-8' },
+      });
+    return relay.fetch(request);
+  },
+  scheduled(
+    _controller: { cron: string },
+    env: ConnectRelayEnv,
+    context: { waitUntil(promise: Promise<unknown>): void },
+  ): void {
+    const relay = relayForEnv(env);
+    if (relay !== undefined) context.waitUntil(relay.reclaim());
+  },
+};

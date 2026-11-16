@@ -1,0 +1,434 @@
+import type { ColorValue } from 'react-native';
+import Svg, { Circle, Path } from 'react-native-svg';
+
+type IconProps = { color: ColorValue; size: number; focused?: boolean };
+
+export function ActivitySearchIcon(props: IconProps) {
+  return <Glyph {...props} d="M16 16l5 5M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0Z" />;
+}
+
+export function ActivityFilterIcon(props: IconProps) {
+  return <Glyph {...props} d="M4 7h16M7 12h10M10 17h4" />;
+}
+
+export function ActivitySortIcon(props: IconProps) {
+  return <Glyph {...props} d="M8 3v18M4 7l4-4 4 4M16 3v18M12 17l4 4 4-4" />;
+}
+
+function Glyph({ d, color, size, focused = false }: IconProps & { d: string }) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <Path
+        d={d}
+        stroke={color}
+        fill={color}
+        fillOpacity={focused ? 0.15 : 0}
+        strokeWidth={1.8}
+        strokeLinejoin="round"
+        strokeLinecap="round"
+      />
+    </Svg>
+  );
+}
+
+export function CloudIcon(props: IconProps) {
+  return <Glyph {...props} d="M6 18h12a4 4 0 0 0 .2-8A6.5 6.5 0 0 0 5.7 9.1 4.5 4.5 0 0 0 6 18Z" />;
+}
+
+export function ChatsIcon(props: IconProps) {
+  return (
+    <Glyph
+      {...props}
+      d="M5 5h14a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-8l-4 3.5V16H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1Z"
+    />
+  );
+}
+
+export function ActivityIcon(props: IconProps) {
+  return <Glyph {...props} d="M6 16V11a6 6 0 1 1 12 0v5l1.5 2h-15L6 16Zm4 4a2 2 0 0 0 4 0" />;
+}
+
+export function PinIcon(props: IconProps) {
+  return <Glyph {...props} d="M9 3h6l-1 6 3 3v2H7v-2l3-3-1-6Zm3 11v7" />;
+}
+
+export function MuteIcon(props: IconProps) {
+  return (
+    <Glyph
+      {...props}
+      d="M6 16V11a6 6 0 0 1 9.5-4.9M18 11v5l1.5 2h-12M10 20a2 2 0 0 0 4 0M3 3l18 18"
+    />
+  );
+}
+
+export function PersonIcon(props: IconProps) {
+  return <Glyph {...props} d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm-7.5 8a7.5 7.5 0 0 1 15 0" />;
+}
+
+export function MembersIcon(props: IconProps) {
+  return (
+    <Glyph
+      {...props}
+      d="M9 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Zm-6.5 8a6.5 6.5 0 0 1 13 0M16 4.3a3.5 3.5 0 0 1 0 6.4M18.5 13.6a6.5 6.5 0 0 1 3 5.4"
+    />
+  );
+}
+
+export function SettingsIcon(props: IconProps) {
+  return (
+    <Glyph
+      {...props}
+      d="M9.7 4.5 10.3 2h3.4l.6 2.5 2 .9 2.2-.7 1.7 2.9-1.6 1.8.2 2.2 1.7 1.7-1.7 2.9-2.3-.5-1.8 1.3-.4 2.5h-3.4l-.6-2.4-2-.9-2.2.7-1.7-2.9 1.6-1.8-.2-2.2-1.7-1.7 1.7-2.9 2.3.5 1.6-1.5ZM15.5 11a3.5 3.5 0 1 1-7 0 3.5 3.5 0 0 1 7 0Z"
+    />
+  );
+}
+
+export function ChevronDownIcon(props: IconProps) {
+  return <Glyph {...props} d="m6 9 6 6 6-6" />;
+}
+
+export function ChevronLeftIcon(props: IconProps) {
+  return <Glyph {...props} d="m15 6-6 6 6 6" />;
+}
+
+export function ArrowBackIcon(props: IconProps) {
+  return <Glyph {...props} d="M19 12H5m7 7-7-7 7-7" />;
+}
+
+export function ChevronRightIcon(props: IconProps) {
+  return <Glyph {...props} d="m9 6 6 6-6 6" />;
+}
+
+export function TobModeIcon(props: IconProps) {
+  return <Glyph {...props} d="M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18ZM8 10.5l4 4 4-4" />;
+}
+
+export function ChevronUpIcon(props: IconProps) {
+  return <Glyph {...props} d="m6 15 6-6 6 6" />;
+}
+
+export function LockIcon(props: IconProps) {
+  return (
+    <Glyph
+      {...props}
+      d="M7 11h10a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1Zm2 0V8a3 3 0 0 1 6 0v3"
+    />
+  );
+}
+
+export function ArrowUpIcon(props: IconProps) {
+  return <Glyph {...props} d="M12 19V5m-6 6 6-6 6 6" />;
+}
+
+export function PlusIcon(props: IconProps) {
+  return <Glyph {...props} d="M12 5v14M5 12h14" />;
+}
+
+export function GitCommitIcon(props: IconProps) {
+  return <Glyph {...props} d="M3 12h5m8 0h5m-5 0a4 4 0 1 1-8 0 4 4 0 0 1 8 0" />;
+}
+
+export function CloseIcon(props: IconProps) {
+  return <Glyph {...props} d="m7 7 10 10M17 7 7 17" />;
+}
+
+export function PhotoIcon(props: IconProps) {
+  return (
+    <Glyph
+      {...props}
+      d="M5 5h14a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1Zm-1 11 4.5-4.5 4 4 2.5-2.5 5 5M15.5 9.5h.01"
+    />
+  );
+}
+
+export function CameraIcon(props: IconProps) {
+  return (
+    <Glyph
+      {...props}
+      d="M4 8a1 1 0 0 1 1-1h3l1.5-2h5L16 7h3a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V8Zm8 8.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"
+    />
+  );
+}
+
+export function FileIcon(props: IconProps) {
+  return (
+    <Glyph {...props} d="M7 3h7l5 5v12a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Zm7 0v5h5" />
+  );
+}
+
+export function MessageIcon(props: IconProps) {
+  return (
+    <Glyph
+      {...props}
+      d="M5 5h14a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1h-7l-4 3v-3H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1Z"
+    />
+  );
+}
+
+export function MicIcon(props: IconProps) {
+  return (
+    <Glyph
+      {...props}
+      d="M12 3a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3Zm-6 9a6 6 0 0 0 12 0m-6 6v3"
+    />
+  );
+}
+
+export function ComputerIcon(props: IconProps) {
+  return (
+    <Glyph
+      {...props}
+      d="M4 5h16a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1Zm5 15h6m-3-3v3"
+    />
+  );
+}
+
+export function PhoneIcon(props: IconProps) {
+  return (
+    <Glyph
+      {...props}
+      d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a1 1 0 0 1-1 1A16 16 0 0 1 4 5a1 1 0 0 1 1-1Z"
+    />
+  );
+}
+
+export function PhoneOffIcon(props: IconProps) {
+  return (
+    <Glyph
+      {...props}
+      d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a1 1 0 0 1-1 1A16 16 0 0 1 4 5a1 1 0 0 1 1-1ZM3 21 21 3"
+    />
+  );
+}
+
+export function ScreenIcon(props: IconProps) {
+  return (
+    <Glyph
+      {...props}
+      d="M4 4h16a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1Zm4 16h8m-4-4v4"
+    />
+  );
+}
+
+export function BrowserIcon(props: IconProps) {
+  return (
+    <Glyph
+      {...props}
+      d="M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Zm-9 9h18M12 3c2.5 2.5 3.5 5.5 3.5 9s-1 6.5-3.5 9c-2.5-2.5-3.5-5.5-3.5-9s1-6.5 3.5-9Z"
+    />
+  );
+}
+
+export function KeyboardIcon(props: IconProps) {
+  return (
+    <Glyph
+      {...props}
+      d="M4 6h16a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1Zm3 4h.01M11 10h.01M15 10h.01M7 14h10"
+    />
+  );
+}
+
+export function RecordingStopIcon({ color, size }: IconProps) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24">
+      <Path
+        d="M8 7h8a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1H8a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1Z"
+        fill={color}
+      />
+    </Svg>
+  );
+}
+
+export function CopyIcon(props: IconProps) {
+  return (
+    <Glyph
+      {...props}
+      d="M9 9h9a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1zM5 15H4.5A.5.5 0 0 1 4 14.5V5a1 1 0 0 1 1-1h9.5a.5.5 0 0 1 .5.5V5"
+    />
+  );
+}
+
+export function ShareIcon(props: IconProps) {
+  return <Glyph {...props} d="M12 15V4M8 8l4-4 4 4M6 12v7a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1v-7" />;
+}
+
+export function FolderIcon(props: IconProps) {
+  return (
+    <Glyph
+      {...props}
+      d="M4 6a1 1 0 0 1 1-1h4.5l2 2H19a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6Z"
+    />
+  );
+}
+
+export function MouseIcon(props: IconProps) {
+  return <Glyph {...props} d="M12 3a6 6 0 0 1 6 6v6a6 6 0 0 1-12 0V9a6 6 0 0 1 6-6Zm0 3v4" />;
+}
+
+export function ControlsIcon(props: IconProps) {
+  return <Glyph {...props} d="M4 7h9m4 0h3M4 17h3m4 0h9M15 5v4M9 15v4" />;
+}
+
+export function KeyboardHideIcon(props: IconProps) {
+  return (
+    <Glyph
+      {...props}
+      d="M4 4h16a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1Zm3 4h.01M11 8h.01M15 8h.01M8 11h8m-6 6 2 2 2-2"
+    />
+  );
+}
+
+export function MouseButtonIcon({
+  color,
+  size,
+  side,
+  mark,
+}: IconProps & { side: 'left' | 'right'; mark: ColorValue }) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <Path
+        d={side === 'left' ? 'M12 4a5 5 0 0 0-5 5v1h5V4Z' : 'M12 4a5 5 0 0 1 5 5v1h-5V4Z'}
+        fill={mark}
+      />
+      <Path
+        d="M12 3a6 6 0 0 1 6 6v6a6 6 0 0 1-12 0V9a6 6 0 0 1 6-6Zm-6 7h12M12 3v7"
+        stroke={color}
+        strokeWidth={1.8}
+        strokeLinejoin="round"
+        strokeLinecap="round"
+      />
+    </Svg>
+  );
+}
+
+export function PointerArrow({
+  size,
+  fill,
+  rim,
+}: {
+  size: number;
+  fill: ColorValue;
+  rim: ColorValue;
+}) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24">
+      <Path
+        d="M3 2v18l5-4.6 3.3 7.2 3-1.4-3.2-7H18L3 2Z"
+        fill={fill}
+        stroke={rim}
+        strokeWidth={1.5}
+        strokeLinejoin="round"
+      />
+    </Svg>
+  );
+}
+
+export function HandBackIcon(props: IconProps) {
+  return <Glyph {...props} d="M14 4h4a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1h-4M10 8l-4 4 4 4M6 12h10" />;
+}
+
+export function MoreIcon({ color, size }: IconProps) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24">
+      <Circle cx={12} cy={5.5} r={1.8} fill={color} />
+      <Circle cx={12} cy={12} r={1.8} fill={color} />
+      <Circle cx={12} cy={18.5} r={1.8} fill={color} />
+    </Svg>
+  );
+}
+
+export function CpuIcon(props: IconProps) {
+  return (
+    <Glyph
+      {...props}
+      d="M8 6h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2Zm2 4h4v4h-4v-4ZM10 3v3m4-3v3m-4 12v3m4-3v3M3 10h3m-3 4h3m12-4h3m-3 4h3"
+    />
+  );
+}
+
+export function CheckIcon(props: IconProps) {
+  return <Glyph {...props} d="m5 12.5 4.5 4.5L19 7.5" />;
+}
+
+export function ClockIcon(props: IconProps) {
+  return <Glyph {...props} d="M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM12 7v5l3 2" />;
+}
+
+export function StopCircleIcon(props: IconProps) {
+  return <Glyph {...props} d="M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM9.5 9.5h5v5h-5Z" />;
+}
+
+export function PlayIcon(props: IconProps) {
+  return <Glyph {...props} d="M8 5.5v13l10-6.5-10-6.5Z" />;
+}
+
+export function PauseIcon(props: IconProps) {
+  return <Glyph {...props} d="M8.5 5.5v13M15.5 5.5v13" />;
+}
+
+export function TrashIcon(props: IconProps) {
+  return (
+    <Glyph
+      {...props}
+      d="M4 7h16M10 3.5h4M6 7l1 12a1.5 1.5 0 0 0 1.5 1.4h7A1.5 1.5 0 0 0 17 19l1-12M10 11v6m4-6v6"
+    />
+  );
+}
+
+export function ArchiveIcon(props: IconProps) {
+  return <Glyph {...props} d="M3 4h18v4H3zM5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8M10 12h4" />;
+}
+
+export function UndoIcon(props: IconProps) {
+  return <Glyph {...props} d="M9 14 4 9l5-5M4 9h10.5a5.5 5.5 0 0 1 0 11H11" />;
+}
+
+export function ReplyIcon(props: IconProps) {
+  return <Glyph {...props} d="M9 17 4 12l5-5M4 12h11a5 5 0 0 1 5 5v2" />;
+}
+
+export function RefreshIcon(props: IconProps) {
+  return (
+    <Glyph {...props} d="M20 7v5h-5M4 17v-5h5M6 7a7 7 0 0 1 12-1l2 6M4 12l2 6a7 7 0 0 0 12-1" />
+  );
+}
+
+export function ShieldCheckIcon(props: IconProps) {
+  return <Glyph {...props} d="M12 3 3 7v5c0 5 9 9 9 9s9-4 9-9V7l-9-4Zm-4 9 3 3 5-5" />;
+}
+export function ExternalLinkIcon(props: IconProps) {
+  return (
+    <Glyph
+      {...props}
+      d="M15 3h6v6m0-6L10 14M9 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-4"
+    />
+  );
+}
+export function TerminalIcon(props: IconProps) {
+  return <Glyph {...props} d="m4 5 6 7-6 7m9 0h7" />;
+}
+export function InfoIcon(props: IconProps) {
+  return <Glyph {...props} d="M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM12 11v6m0-10v1" />;
+}
+
+export function WorkIcon(props: IconProps) {
+  return (
+    <Glyph
+      {...props}
+      d="M9 6V4.5A1.5 1.5 0 0 1 10.5 3h3A1.5 1.5 0 0 1 15 4.5V6M4 6h16a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1ZM3 12h18"
+    />
+  );
+}
+
+export function MemoryIcon(props: IconProps) {
+  return (
+    <Glyph
+      {...props}
+      d="M5 4.5A1.5 1.5 0 0 1 6.5 3H19v18H6.5A1.5 1.5 0 0 1 5 19.5v-15ZM5 18h14M9 3v8l2-1.5 2 1.5V3"
+    />
+  );
+}
+
+export function PencilIcon(props: IconProps) {
+  return <Glyph {...props} d="M4 20h4L19 9a2.83 2.83 0 0 0-4-4L4 16v4Zm9.5-13.5 4 4" />;
+}

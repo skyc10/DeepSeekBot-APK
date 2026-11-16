@@ -1,0 +1,86 @@
+import type { ApprovalDecider } from '../team/approval-contract.js';
+import { z } from 'zod';
+
+export const privateRequestSchema = z
+  .strictObject({
+    account: z.string().min(1).max(120),
+    purpose: z.string().min(1).max(1000),
+    fields: z
+      .array(
+        z.strictObject({
+          id: z.string().regex(/^[a-z][a-z0-9_]{0,47}$/),
+          label: z.string().min(1).max(120),
+          required: z.boolean(),
+        }),
+      )
+      .min(1)
+      .max(8),
+  })
+  .refine(
+    (request) => new Set(request.fields.map((field) => field.id)).size === request.fields.length,
+  );
+
+export type PrivateInputDeclaration = z.infer<typeof privateRequestSchema>;
+export type PrivateInputStatus = 'pending' | 'configured' | 'cancelled' | 'expired';
+export interface PrivateInputCard extends PrivateInputDeclaration {
+  opaque?: boolean;
+  decidedBy?: ApprovalDecider;
+  sessionId?: string;
+  expiresAt?: string;
+  replacesMessageId?: string;
+}
+export interface PrivateAccountStatus {
+  status: 'configured' | 'revoked' | 'superseded' | 'unavailable';
+  references: Record<string, string>;
+}
+export interface PrivateAccountSummary {
+  account: string;
+  purpose?: string;
+  fields: { id: string; label: string; required: boolean }[];
+  status: 'configured' | 'replacing' | 'unavailable';
+  configuredAt?: string;
+  channelId?: string;
+  messageId?: string;
+  replacementMessageId?: string;
+}
+export interface PrivateRevocationResult {
+  accepted: boolean;
+  stopped: number;
+  completed: number;
+  uncertain: number;
+}
+export const PRIVATE_SUBMISSION_REFUSALS = [
+  'not-owner',
+  'not-pending',
+  'busy',
+  'invalid-fields',
+  'store-unavailable',
+  'expired',
+  'version-changed',
+  'save-failed',
+  'not-committed',
+] as const;
+export type PrivateSubmissionRefusal = (typeof PRIVATE_SUBMISSION_REFUSALS)[number];
+export interface PrivateSubmissionResult {
+  accepted: boolean;
+  reason?: PrivateSubmissionRefusal;
+}
+export interface PrivateInputResult {
+  status: 'configured' | 'cancelled' | 'expired';
+  account: string;
+  references: Record<string, string>;
+}
+export interface PrivateInputResolution {
+  decidedBy?: ApprovalDecider;
+  requestMessageId: string;
+  state: 'configured' | 'cancelled' | 'expired';
+  references: Record<string, string>;
+}
+
+export const privateSubmissionSchema = z.strictObject({
+  channelId: z.string().min(1).max(160),
+  messageId: z.string().uuid(),
+  values: z
+    .record(z.string(), z.string().max(16_384))
+    .refine((values) => Object.keys(values).length <= 8),
+});

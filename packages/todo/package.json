@@ -1,0 +1,34 @@
+{
+  "name": "@botharness/todo",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Example BotHarness plugin: a shared to-do list that Humans and PersonaBots keep together (ADR-0203)",
+  "files": [
+    "dist",
+    "cordis.patch.yml"
+  ],
+  "type": "module",
+  "main": "./dist/index.mjs",
+  "exports": {
+    ".": "./dist/index.mjs",
+    "./package.json": "./package.json"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.1.0",
+    "@deepseek-ai/dsh-agent": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-storage-domain": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-tools": "0.2.2-rc.1",
+    "zod": "4.4.3"
+  },
+  "peerDependencies": {},
+  "engines": {
+    "dsh": ">=0.2.0-0",
+    "node": ">=22"
+  },
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

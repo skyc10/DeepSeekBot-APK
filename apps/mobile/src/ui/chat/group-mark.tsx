@@ -1,0 +1,61 @@
+import { Image, View } from 'react-native';
+
+import { useDesignTheme } from '../design/theme';
+import type { TextVariant } from '../primitives/text';
+import { Text } from '../primitives/text';
+
+export function GroupMark({
+  avatar,
+  initial = '#',
+  size,
+  corner,
+  fill,
+  variant = 'body',
+  strong = true,
+  labelScale = 1,
+}: {
+  avatar: string | undefined;
+  initial?: string;
+  size: number;
+  corner: number;
+  fill?: string;
+  variant?: TextVariant;
+  strong?: boolean;
+  labelScale?: number;
+}) {
+  const theme = useDesignTheme();
+  return (
+    <View
+      style={{
+        width: size,
+        height: size,
+        borderRadius: corner,
+        overflow: 'hidden',
+        backgroundColor: fill ?? theme.color.surface,
+        alignItems: 'center',
+        justifyContent: 'center',
+      }}
+    >
+      {avatar === undefined ? (
+        <Text
+          allowFontScaling={false}
+          variant={variant}
+          strong={strong}
+          tone="muted"
+          style={{
+            fontSize: theme.type[variant].size * labelScale,
+            lineHeight: theme.type[variant].line * labelScale,
+          }}
+        >
+          {initial}
+        </Text>
+      ) : (
+        <Image
+          testID="group-avatar"
+          source={{ uri: avatar }}
+          style={{ width: size, height: size }}
+        />
+      )}
+    </View>
+  );
+}

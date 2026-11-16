@@ -1,0 +1,26 @@
+---
+import BaseLayout from "../layouts/BaseLayout.astro";
+import Header from "../components/Header.astro";
+import Landing from "../components/landing/Landing";
+import { getCollection } from "astro:content";
+import { config } from "virtual:nimbus/config";
+import "../../../../design/tokens.css";
+
+export const prerender = true;
+
+const recent = (await getCollection("changelog", (entry) => !entry.data.draft))
+  .sort((a, b) => b.data.date.getTime() - a.data.date.getTime())
+  .slice(0, 3)
+  .map((entry) => ({
+    title: entry.data.title,
+    href: `/changelog/${entry.id}`,
+    date: entry.data.date.toISOString().slice(0, 10),
+  }));
+---
+
+<BaseLayout title={config.title} description={config.description}>
+  <Header showSidebar={false} />
+  <div class="relative isolate" data-bh-landing>
+    <Landing recent={recent} />
+  </div>
+</BaseLayout>

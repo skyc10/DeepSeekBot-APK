@@ -1,0 +1,945 @@
+import { measureMessageView } from '../primitives/measure-message-view';
+import {
+  memo,
+  useCallback,
+  useContext,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type ComponentProps,
+  type ReactNode,
+} from 'react';
+import { useReplyHaptic } from './reply-haptic';
+import { MediaLongPress } from './media-long-press';
+import { Gesture, GestureDetector } from 'react-native-gesture-handler';
+import {
+  AppState,
+  Platform,
+  Pressable,
+  View,
+  useWindowDimensions,
+  type AccessibilityActionEvent,
+  type AccessibilityRole,
+  type DimensionValue,
+  type LayoutChangeEvent,
+  type ViewInstance,
+} from 'react-native';
+import Animated, {
+  Easing,
+  useAnimatedStyle,
+  useReducedMotion,
+  useSharedValue,
+  withSpring,
+  withTiming,
+} from 'react-native-reanimated';
+
+import {
+  reactable,
+  reactedByMe,
+  type ConversationDraft,
+  type ConversationMessage,
+  type ConversationReaction,
+  type MessageAttachment,
+} from '../../host/conversation';
+import type { RosterBot } from '../../host/client';
+import type { ConversationPlayback } from '../../host/conversation-playback';
+import { spring } from '../design/motion';
+import { doubleTap, lift, mediaBubble, motion, radius, space } from '../design/tokens';
+import { pressTint, useDesignTheme } from '../design/theme';
+import { MessageBody } from './message-body';
+import { Text } from '../primitives/text';
+import { StreamSurface } from '../primitives/stream-surface';
+import { haptic } from '../haptics';
+import { useStrings, t } from '../strings';
+import {
+  BADGE_OVERLAP,
+  BUBBLE_PADDING,
+  oneLine,
+  singleLine,
+  BUBBLE_MAX,
+  bubbleCorners,
+  bubbleRow,
+  bubbleShape,
+  type BubbleGroup,
+} from './bubble-shape';
+import { DeliveryReceiptButton, ReadingBadge } from './delivery-stack';
+import { MessageAlbum, MessageFiles, QuoteThumbnail, albumWidth } from './message-attachments';
+import { GenuiDocumentCard } from './genui-document-card';
+import { VoiceBar } from './voice-bar';
+import { openMessageMenu } from './message-menu';
+import { ReactionChips } from './message-reactions';
+import { ReplyQuote } from './reply-quote';
+import { ReplySwipe } from './reply-swipe';
+import { PopIn, usePopIn } from './pop-in';
+import { bubbleTime } from './message-groups';
+import type { Rect } from './menu-placement';
+import { SpeakerRow, type Speaker } from './speaker-row';
+import { SendFlightsContext } from './send-fly';
+import { SendFlyBackdrop, SendFlyFrame } from './send-fly-frame';
+
+export type { Speaker } from './speaker-row';
+
+export function deliveryLabel(message: ConversationMessage): string | undefined {
+  if (message.author !== 'human') return undefined;
+  if (message.delivery === 'pending') return undefined;
+  if (message.delivery === 'failed') return `${t.notSent} · ${t.retrySend}`;
+  return message.revision === undefined ? t.sent : undefined;
+}
+
+const PENDING_FEEDBACK_MS = 3_000;
+
+const DELIVERED = '\u00a0✓';
+
+const BESIDE_MAX = 60;
+
+function messageTime(message: ConversationMessage, streaming: boolean): string | undefined {
+  if (streaming) return undefined;
+  if (message.author !== 'human' && message.delivery !== 'committed') return undefined;
+  const clock = bubbleTime(message.at);
+  if (clock === '') return undefined;
+  return message.author === 'human' ? `${clock}${DELIVERED}` : clock;
+}
+
+function MessageTime({
+  time,
+  human,
+  floating = false,
+  onMedia = false,
+  unsent = false,
+}: {
+  time: string;
+  human: boolean;
+  floating?: boolean;
+  onMedia?: boolean;
+  unsent?: boolean;
+}) {
+  const check = unsent && time.endsWith(DELIVERED);
+  const clock = check ? time.slice(0, -DELIVERED.length) : time;
+  return (
+    <Text
+      testID="message-time"
+      accessibilityLabel={check ? clock : undefined}
+      variant="meta"
+      tone={human ? 'onAccent' : 'muted'}
+      numberOfLines={1}
+      style={[
+        { alignSelf: 'flex-end', fontVariant: ['tabular-nums'] },
+        onMedia ? { color: mediaBubble.ink } : null,
+        floating
+          ? {
+              position: 'absolute',
+              right: BUBBLE_PADDING.horizontal,
+              bottom: BUBBLE_PADDING.vertical,
+            }
+          : null,
+      ]}
+    >
+      {clock}
+      {check ? (
+        <Text testID="message-time-unsent" style={{ color: 'transparent' }}>
+          {DELIVERED}
+        </Text>
+      ) : null}
+    </Text>
+  );
+}
+
+function ImageTime({ time, human, unsent }: { time: string; human: boolean; unsent: boolean }) {
+  return (
+    <View
+      testID="message-image-time"
+      pointerEvents="none"
+      style={{
+        position: 'absolute',
+        right: space.x3,
+        bottom: space.x3,
+        paddingHorizontal: space.x3,
+        paddingVertical: space.x1,
+        borderRadius: radius.round,
+        backgroundColor: mediaBubble.scrim,
+      }}
+    >
+      <MessageTime time={time} human={human} onMedia unsent={unsent} />
+    </View>
+  );
+}
+
+function TimeSpacer({ time }: { time: string }) {
+  return (
+    <View
+      accessibilityElementsHidden
+      importantForAccessibility="no-hide-descendants"
+      style={{ opacity: 0, paddingLeft: space.x3 }}
+    >
+      <Text variant="meta" numberOfLines={1} style={{ fontVariant: ['tabular-nums'] }}>
+        {time}
+      </Text>
+    </View>
+  );
+}
+
+const NO_READERS: readonly string[] = [];
+const NO_REACTIONS: readonly ConversationReaction[] = [];
+
+const NO_BOTS: readonly RosterBot[] = [];
+
+function usePendingFeedback(message: ConversationMessage): boolean {
+  const started =
+    message.author === 'human' && message.delivery === 'pending'
+      ? message.attemptStartedAt
+      : undefined;
+  const subscribe = useCallback(
+    (notify: () => void) => {
+      if (started === undefined) return () => {};
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const update = () => {
+        clearTimeout(timer);
+        if (AppState.currentState !== 'active') return;
+        notify();
+        const remaining = started + PENDING_FEEDBACK_MS - Date.now();
+        if (remaining > 0) timer = setTimeout(update, remaining);
+      };
+      update();
+      const subscription = AppState.addEventListener('change', update);
+      return () => {
+        clearTimeout(timer);
+        subscription.remove();
+      };
+    },
+    [started],
+  );
+  const snapshot = useCallback(
+    () => started !== undefined && Date.now() >= started + PENDING_FEEDBACK_MS,
+    [started],
+  );
+  return useSyncExternalStore(subscribe, snapshot, snapshot);
+}
+
+export function BubbleBody({
+  message,
+  group,
+  onOpenImage = () => {},
+  onShare = async () => {},
+  fill,
+  streaming = false,
+  deliveryAccessibility = true,
+  onImageReady,
+  onLayout,
+  quote,
+}: {
+  quote?: ReactNode;
+  onLayout?: ((event: LayoutChangeEvent) => void) | undefined;
+  onImageReady?: ((key: string, ready: boolean) => void) | undefined;
+  message: ConversationMessage;
+  group: BubbleGroup;
+  onOpenImage?: (attachment: MessageAttachment) => void;
+  onShare?: (attachment: MessageAttachment) => Promise<void>;
+  fill?: { maxWidth?: DimensionValue; width?: number; maxHeight?: number } | undefined;
+  streaming?: boolean;
+  deliveryAccessibility?: boolean;
+}) {
+  const t = useStrings();
+  const theme = useDesignTheme();
+  const backdrop = useContext(SendFlyBackdrop);
+  const human = message.author === 'human';
+  const ink = human ? 'onAccent' : 'fg';
+  const time = messageTime(message, streaming);
+  const unsent = human && message.delivery !== 'committed';
+  const { fontScale, width: screen } = useWindowDimensions();
+  const [wrapped, setWrapped] = useState<string | undefined>(undefined);
+  const images = message.attachments.filter((attachment) => attachment.kind === 'image');
+  const files = message.attachments.filter((attachment) => attachment.kind !== 'image');
+  const album = images.length > 0;
+  const hasBody = message.body.trim() !== '';
+  const lastInBubble =
+    time !== undefined && files.length === 0 && message.card === undefined && hasBody;
+  const beside =
+    lastInBubble &&
+    !human &&
+    wrapped !== message.body &&
+    !message.body.includes('\n') &&
+    message.body.length <= BESIDE_MAX;
+  const captioned =
+    hasBody ||
+    streaming ||
+    files.length > 0 ||
+    message.card !== undefined ||
+    message.voice !== undefined;
+  const pillTime = album && !captioned ? time : undefined;
+  const width = album ? albumWidth(screen) : undefined;
+  const body =
+    !hasBody && !streaming && message.attachments.length > 0 ? null : beside ? (
+      <View
+        testID="message-body-row"
+        style={{ flexDirection: 'row', alignItems: 'flex-end', gap: space.x3 }}
+      >
+        <View
+          testID="message-body"
+          style={{ flexShrink: 1 }}
+          onLayout={(event) => {
+            if (!oneLine(event.nativeEvent.layout.height, theme.type.body.line, fontScale))
+              setWrapped(message.body);
+          }}
+        >
+          <MessageBody message={message} streaming={streaming} />
+        </View>
+        <MessageTime time={time} human={human} />
+      </View>
+    ) : (
+      <MessageBody
+        message={message}
+        streaming={streaming}
+        trail={lastInBubble && human ? <TimeSpacer time={time} /> : undefined}
+      />
+    );
+  const details = (
+    <>
+      {message.voice === undefined ? null : <VoiceBar voice={message.voice} human={human} />}
+      {body}
+      {message.genuiDocument === undefined ? null : (
+        <GenuiDocumentCard
+          document={message.genuiDocument}
+          channelId={message.source?.channelId}
+          messageId={message.id}
+        />
+      )}
+      {files.length > 0 ? <MessageFiles files={files} human={human} onShare={onShare} /> : null}
+      {message.card ? (
+        <Text variant="meta" tone={human ? ink : 'muted'} style={{ fontStyle: 'italic' }}>
+          {t.card}
+        </Text>
+      ) : null}
+      {time === undefined || beside || pillTime !== undefined ? null : (
+        <MessageTime time={time} human={human} floating={lastInBubble && human} unsent={unsent} />
+      )}
+    </>
+  );
+  return (
+    <StreamSurface
+      active={streaming}
+      {...(onLayout === undefined ? {} : { onLayout })}
+      style={{
+        ...bubbleShape(human, group),
+        ...fill,
+        ...(album ? { width, padding: 0, paddingHorizontal: 0, paddingVertical: 0 } : null),
+        overflow: album || fill?.maxHeight !== undefined ? 'hidden' : 'visible',
+        backgroundColor:
+          backdrop !== undefined ? 'transparent' : human ? theme.color.accent : theme.color.surface,
+        gap: album ? 0 : space.x2,
+      }}
+    >
+      {backdrop === undefined ? null : (
+        <Animated.View
+          pointerEvents="none"
+          style={[
+            {
+              position: 'absolute',
+              top: 0,
+              right: 0,
+              bottom: 0,
+              left: 0,
+              ...bubbleCorners(human, group),
+              backgroundColor: human ? theme.color.accent : theme.color.surface,
+            },
+            backdrop,
+          ]}
+        />
+      )}
+      {deliveryAccessibility && human && message.delivery === 'pending' ? (
+        <View
+          accessible
+          accessibilityLabel={t.sending}
+          accessibilityState={{ busy: true }}
+          style={{ position: 'absolute', width: 1, height: 1, overflow: 'hidden' }}
+        />
+      ) : null}
+      {quote === undefined ? null : album ? (
+        <View
+          style={{
+            paddingHorizontal: space.x3,
+            paddingTop: space.x3,
+            paddingBottom: space.x3,
+          }}
+        >
+          {quote}
+        </View>
+      ) : (
+        quote
+      )}
+      {album ? (
+        <MessageAlbum
+          images={images}
+          human={human}
+          width={width!}
+          onOpenImage={onOpenImage}
+          onImageReady={onImageReady}
+        >
+          {pillTime === undefined ? null : (
+            <ImageTime time={pillTime} human={human} unsent={unsent} />
+          )}
+        </MessageAlbum>
+      ) : null}
+      {album ? (
+        captioned ? (
+          <View
+            style={{
+              paddingHorizontal: BUBBLE_PADDING.horizontal,
+              paddingVertical: BUBBLE_PADDING.vertical,
+              gap: space.x2,
+            }}
+          >
+            {details}
+          </View>
+        ) : null
+      ) : (
+        details
+      )}
+    </StreamSurface>
+  );
+}
+
+function PressableBubble({
+  human,
+  group,
+  lifted,
+  accessibilityRole,
+  accessibilityLabel,
+  accessibilityHint,
+  accessibilityActionLabel,
+  pending = false,
+  ungrouped = false,
+  onPress,
+  onLongPress,
+  onDoubleTap,
+  onHold,
+  onInteractionStart,
+  tapOpens = false,
+  onOpenReply,
+  children,
+}: {
+  onHold?: (() => void) | undefined;
+  onInteractionStart?: () => void;
+  tapOpens?: boolean;
+  onOpenReply?: (() => void) | undefined;
+  human: boolean;
+  group: BubbleGroup;
+  lifted: boolean;
+  accessibilityRole?: AccessibilityRole;
+  accessibilityLabel?: string | undefined;
+  accessibilityHint?: string;
+  accessibilityActionLabel?: string;
+  pending?: boolean;
+  ungrouped?: boolean;
+  onPress?: () => void;
+  onLongPress?: (anchor: Rect) => void;
+  onDoubleTap?: () => void;
+  children: ReactNode;
+}) {
+  const t = useStrings();
+  const theme = useDesignTheme();
+  const reduced = useReducedMotion();
+  const ref = useRef<ViewInstance>(null);
+  const anchor = useRef<Rect | undefined>(undefined);
+  const tapped = useRef<number | undefined>(undefined);
+  const scale = useSharedValue(1);
+  const held = useAnimatedStyle(() => ({ transform: [{ scale: scale.value }] }));
+  const shrinks = Platform.OS === 'ios' && !reduced && onLongPress !== undefined;
+  const measure = (then?: (rect: Rect) => void) =>
+    measureMessageView(
+      ref.current,
+      (x, y, width, height) => {
+        anchor.current = { x, y, width, height };
+        then?.(anchor.current);
+      },
+      () => undefined,
+    );
+  const open = () => {
+    if (onLongPress === undefined) return;
+    if (anchor.current !== undefined) onLongPress(anchor.current);
+    else measure(onLongPress);
+  };
+  const hold =
+    onHold !== undefined
+      ? () => {
+          haptic('menu');
+          onHold();
+        }
+      : onLongPress === undefined
+        ? undefined
+        : () => {
+            haptic('menu');
+            if (shrinks) scale.value = withSpring(1, spring.spatial.fast);
+            open();
+          };
+  const tap = tapOpens && onLongPress !== undefined ? open : undefined;
+  const nativeHolding = (Platform.OS === 'android' || Platform.OS === 'ios') && hold !== undefined;
+  const currentHold = useRef(hold);
+  currentHold.current = hold;
+  const nativeHold = useMemo(
+    () =>
+      Gesture.LongPress()
+        .enabled(nativeHolding)
+        .minDuration(motion.lift)
+        .runOnJS(true)
+        .onStart(() => currentHold.current?.()),
+    [nativeHolding],
+  );
+  const bubble = (
+    <Animated.View
+      ref={ref}
+      collapsable={false}
+      style={[
+        {
+          ...bubbleCorners(human, group),
+          maxWidth: '100%',
+          alignSelf: human ? 'flex-end' : 'flex-start',
+          overflow: 'hidden',
+          opacity: lifted ? 0 : 1,
+        },
+        held,
+      ]}
+    >
+      <Pressable
+        {...(onInteractionStart === undefined ? {} : { onTouchStart: onInteractionStart })}
+        {...(ungrouped ? { accessible: false } : {})}
+        {...(pending
+          ? { accessibilityState: { busy: true }, accessibilityValue: { text: t.sending } }
+          : {})}
+        {...(accessibilityRole === undefined ? {} : { accessibilityRole })}
+        {...(accessibilityLabel === undefined ? {} : { accessibilityLabel })}
+        {...(accessibilityHint === undefined ? {} : { accessibilityHint })}
+        {...(onLongPress === undefined && onOpenReply === undefined
+          ? {}
+          : {
+              accessibilityActions: [
+                ...(onLongPress === undefined
+                  ? []
+                  : [{ name: 'longpress', label: accessibilityActionLabel ?? t.messageActions }]),
+                ...(onOpenReply === undefined
+                  ? []
+                  : [{ name: 'reply-original', label: t.reply.jumpHint }]),
+              ],
+              onAccessibilityAction: (event: AccessibilityActionEvent) => {
+                if (event.nativeEvent.actionName === 'reply-original') {
+                  onOpenReply?.();
+                  return;
+                }
+                anchor.current = undefined;
+                open();
+              },
+            })}
+        {...(hold === undefined || nativeHolding ? {} : { onLongPress: hold })}
+        {...(onPress !== undefined
+          ? { onPress }
+          : tap !== undefined
+            ? { onPress: tap }
+            : onDoubleTap === undefined
+              ? {}
+              : {
+                  onPress: () => {
+                    const now = Date.now();
+                    if (secondTap(tapped.current, now)) {
+                      tapped.current = undefined;
+                      haptic('react');
+                      onDoubleTap();
+                    } else tapped.current = now;
+                  },
+                })}
+        delayLongPress={motion.lift}
+        android_ripple={{
+          color: pressTint(human ? theme.color.onAccent : theme.color.fg),
+          foreground: true,
+        }}
+        onPressIn={() => {
+          anchor.current = undefined;
+          measure();
+          if (shrinks)
+            scale.value = withTiming(lift, {
+              duration: motion.lift,
+              easing: Easing.out(Easing.quad),
+            });
+        }}
+        onPressOut={() => {
+          if (shrinks) scale.value = withSpring(1, spring.spatial.fast);
+        }}
+      >
+        <MediaLongPress.Provider value={nativeHolding ? undefined : hold}>
+          {children}
+        </MediaLongPress.Provider>
+      </Pressable>
+    </Animated.View>
+  );
+  return nativeHolding ? <GestureDetector gesture={nativeHold}>{bubble}</GestureDetector> : bubble;
+}
+
+const entered = new Set<string>();
+
+export function replyable(message: ConversationMessage): boolean {
+  return (
+    message.author !== 'system' &&
+    message.delivery === 'committed' &&
+    message.welcome === undefined &&
+    message.card === undefined &&
+    message.activity === undefined
+  );
+}
+
+export function secondTap(last: number | undefined, now: number): boolean {
+  return last !== undefined && now - last <= doubleTap.window;
+}
+
+export const MessageBubble = memo(function MessageBubble({
+  message,
+  first = true,
+  last = true,
+  onRetry,
+  onOpenImage = () => {},
+  onShare = async () => {},
+  onLongPress = (pressed) => openMessageMenu(pressed.body),
+  onSelect,
+  onReact,
+  onReply,
+  onOpenReply,
+  onOpenDelivery,
+  onInteractionStart,
+  readers = NO_READERS,
+  bots = NO_BOTS,
+  botName = (id) => id,
+  speaker,
+  lifted = false,
+  streaming = false,
+  rowKey = message.id,
+  entering = false,
+}: {
+  entering?: boolean;
+  message: ConversationMessage;
+  first?: boolean;
+  last?: boolean;
+  onRetry?: (messageId: string) => void;
+  onOpenImage?: (attachment: MessageAttachment) => void;
+  onShare?: (attachment: MessageAttachment) => Promise<void>;
+  onLongPress?: (message: ConversationMessage, anchor: Rect, group: BubbleGroup) => void;
+  onSelect?: ((message: ConversationMessage) => void) | undefined;
+  onReact?: (messageId: string, emoji: string, active: boolean) => void;
+  onReply?: ((message: ConversationMessage) => void) | undefined;
+  onOpenReply?: ((messageId: string) => void) | undefined;
+  onOpenDelivery?: ((message: ConversationMessage) => void) | undefined;
+  onInteractionStart?: () => void;
+  readers?: readonly string[] | undefined;
+  bots?: readonly RosterBot[] | undefined;
+  botName?: (id: string) => string;
+  speaker?: Speaker | undefined;
+  lifted?: boolean;
+  streaming?: boolean;
+  rowKey?: string;
+}) {
+  const t = useStrings();
+  const human = message.author === 'human';
+  const failed = message.delivery === 'failed';
+  const label = deliveryLabel(message);
+  const pendingFeedback = usePendingFeedback(message);
+  const theme = useDesignTheme();
+  const { fontScale } = useWindowDimensions();
+  const [compact, setCompact] = useState(false);
+  const [enter] = useState(() => {
+    const fresh = entering && !entered.has(rowKey);
+    entered.add(rowKey);
+    return fresh;
+  });
+  const pop = usePopIn(enter);
+  const flights = useContext(SendFlightsContext);
+  const [flight] = useState(() => (human ? flights?.flight(message.id) : undefined));
+  const [readingStill, setReadingStill] = useState(readers.length > 0);
+  if (readingStill && readers.length === 0) setReadingStill(false);
+  const [reactionsStill] = useState(
+    () => new Set((message.reactions ?? []).map((reaction) => reaction.emoji)),
+  );
+  const reactions = streaming ? NO_REACTIONS : (message.reactions ?? NO_REACTIONS);
+  const [chipsMounted, setChipsMounted] = useState(reactions.length > 0);
+  if (!chipsMounted && reactions.length > 0) setChipsMounted(true);
+  const reading = streaming ? NO_READERS : readers;
+  const [shownReading, setShownReading] = useState(reading);
+  if (reading.length > 0 && reading.join('\n') !== shownReading.join('\n'))
+    setShownReading(reading);
+  if (message.author === 'system')
+    return (
+      <View
+        style={{ paddingHorizontal: space.x6, paddingVertical: space.x2, alignItems: 'center' }}
+      >
+        <Text selectable variant="meta" tone="muted" style={{ textAlign: 'center' }}>
+          {message.body}
+        </Text>
+      </View>
+    );
+  const copyable = message.body.trim() !== '';
+  const actionable =
+    !streaming &&
+    (copyable || message.attachments.length > 0 || (onReact !== undefined && reactable(message)));
+  const group = { first, last, avatar: speaker?.last === true, compact };
+  const tapMenu = Platform.OS === 'android' && onSelect !== undefined;
+  const replyTo = message.replyTo;
+  const bubble = (
+    <BubbleBody
+      message={message}
+      group={group}
+      onLayout={(event) =>
+        setCompact(singleLine(event.nativeEvent.layout.height, theme.type.body.line, fontScale))
+      }
+      onOpenImage={onOpenImage}
+      onShare={onShare}
+      deliveryAccessibility={
+        (human && message.delivery === 'pending' && message.attachments.length > 0) ||
+        !(failed || actionable || streaming)
+      }
+      fill={{ maxWidth: '100%' }}
+      streaming={streaming}
+      quote={
+        replyTo === undefined ? undefined : (
+          <ReplyQuote
+            preview={message.replyPreview}
+            thumbnail={
+              message.replyPreview?.media?.kind === 'image' &&
+              message.replyThumbnail !== undefined ? (
+                <QuoteThumbnail thumbnail={message.replyThumbnail} />
+              ) : undefined
+            }
+            botName={botName}
+            onAccent={human}
+            onOpen={onOpenReply === undefined ? undefined : () => onOpenReply(replyTo)}
+          />
+        )
+      }
+    />
+  );
+  const content =
+    failed || actionable || streaming ? (
+      <PressableBubble
+        human={human}
+        group={group}
+        lifted={lifted}
+        {...(Platform.OS === 'ios' && message.genuiDocument !== undefined && onInteractionStart
+          ? { onInteractionStart }
+          : {})}
+        pending={human && message.delivery === 'pending'}
+        ungrouped={human && message.delivery === 'pending' && message.attachments.length > 0}
+        {...(failed ? { accessibilityRole: 'button' as const, accessibilityLabel: label } : {})}
+        {...(actionable
+          ? {
+              accessibilityHint: t.messageActionsHint,
+              accessibilityActionLabel: t.messageActions,
+              onLongPress: (anchor: Rect) => onLongPress(message, anchor, group),
+              ...(tapMenu ? { tapOpens: true, onHold: () => onSelect?.(message) } : {}),
+            }
+          : {})}
+        {...(failed ? { onPress: () => onRetry?.(message.id) } : {})}
+        {...(replyTo === undefined || onOpenReply === undefined || !message.replyPreview
+          ? {}
+          : { onOpenReply: () => onOpenReply(replyTo) })}
+        {...(!tapMenu && !streaming && onReact !== undefined && reactable(message)
+          ? {
+              onDoubleTap: () =>
+                onReact(
+                  message.id,
+                  doubleTap.emoji,
+                  !(message.reactions ?? []).some(
+                    (reaction) => reaction.emoji === doubleTap.emoji && reactedByMe(reaction),
+                  ),
+                ),
+            }
+          : {})}
+      >
+        {bubble}
+      </PressableBubble>
+    ) : (
+      bubble
+    );
+  const badged = chipsMounted || shownReading.length > 0;
+  const frame = {
+    alignSelf: human ? 'flex-end' : 'flex-start',
+    maxWidth: BUBBLE_MAX,
+    ...(message.genuiDocument === undefined ? {} : { width: BUBBLE_MAX }),
+    transformOrigin: human ? 'right bottom' : 'left bottom',
+  } as const;
+  const framedContent = (
+    <>
+      <ReplySwipe
+        enabled={onReply !== undefined && !streaming && replyable(message)}
+        onReply={() => onReply?.(message)}
+      >
+        {content}
+      </ReplySwipe>
+      {badged ? (
+        <View
+          pointerEvents="box-none"
+          style={{
+            position: 'absolute',
+            bottom: -BADGE_OVERLAP,
+            left: space.x4,
+            right: space.x4,
+            flexDirection: human ? 'row-reverse' : 'row',
+            alignItems: 'center',
+            gap: space.x2,
+          }}
+        >
+          {!chipsMounted ? null : (
+            <ReactionChips
+              reactions={reactions}
+              still={reactionsStill}
+              human={human}
+              botName={botName}
+              {...(onReact === undefined
+                ? {}
+                : {
+                    onToggle: (emoji: string, active: boolean) =>
+                      onReact(message.id, emoji, active),
+                  })}
+            />
+          )}
+          {shownReading.length === 0 ? null : (
+            <PopIn
+              enabled={!readingStill}
+              show={reading.length > 0}
+              onHidden={() => setShownReading(NO_READERS)}
+              {...(human ? { style: { marginRight: 'auto' } } : {})}
+            >
+              <ReadingBadge messageId={message.id} readers={shownReading} bots={bots} />
+            </PopIn>
+          )}
+        </View>
+      ) : null}
+    </>
+  );
+  const framed =
+    flight !== undefined && flights !== undefined ? (
+      <SendFlyFrame messageId={message.id} flight={flight} flights={flights} style={frame}>
+        {framedContent}
+      </SendFlyFrame>
+    ) : (
+      <Animated.View ref={pop.ref} style={[frame, pop.style]}>
+        {framedContent}
+      </Animated.View>
+    );
+  const surface = human ? (
+    <View
+      style={{
+        flexDirection: 'row',
+        alignItems: 'flex-end',
+        justifyContent: 'flex-end',
+        gap: space.x2,
+      }}
+    >
+      <View
+        style={{
+          minWidth: space.x6,
+          alignItems: 'center',
+          paddingBottom: space.x1,
+        }}
+      >
+        {failed ? (
+          <Pressable
+            testID={`message-retry-${message.id}`}
+            accessibilityRole="button"
+            accessibilityLabel={label}
+            onPress={() => onRetry?.(message.id)}
+          >
+            <Text variant="meta" tone="danger">
+              !
+            </Text>
+          </Pressable>
+        ) : pendingFeedback ? (
+          <Text
+            accessibilityLabel={t.sending}
+            accessibilityLiveRegion="polite"
+            variant="meta"
+            tone="muted"
+          >
+            …
+          </Text>
+        ) : onOpenDelivery !== undefined && !streaming ? (
+          <DeliveryReceiptButton message={message} bots={bots} onOpen={onOpenDelivery} />
+        ) : null}
+      </View>
+      {framed}
+    </View>
+  ) : (
+    framed
+  );
+  const row = {
+    ...bubbleRow(first),
+    ...(reactions.length > 0
+      ? { paddingBottom: BADGE_OVERLAP + space.x2 }
+      : last
+        ? { paddingBottom: space.x2 }
+        : {}),
+  };
+  const placed =
+    speaker !== undefined ? (
+      <SpeakerRow
+        speaker={speaker}
+        rowKey={rowKey}
+        inset={row.paddingTop}
+        style={row}
+        bubble={surface}
+        entering={enter}
+      />
+    ) : (
+      <View style={row}>{surface}</View>
+    );
+  return placed;
+});
+
+export const DraftBubble = memo(function DraftBubble({
+  draft,
+  speaker,
+}: {
+  draft: ConversationDraft;
+  speaker?: Speaker | undefined;
+}) {
+  const message: ConversationMessage = {
+    id: `draft:${draft.draftId}`,
+    at: '',
+    author: 'bot',
+    bot: draft.botSlug,
+    body: draft.body,
+    attachments: [],
+    delivery: 'pending',
+  };
+  return <MessageBubble message={message} speaker={speaker} streaming />;
+});
+
+export const PlaybackBubble = memo(function PlaybackBubble({
+  playback,
+  queueKey,
+  message,
+  focused = false,
+  ...props
+}: Omit<ComponentProps<typeof MessageBubble>, 'message' | 'streaming'> & {
+  playback?: ConversationPlayback | undefined;
+  queueKey: string;
+  focused?: boolean;
+  message?: ConversationMessage | undefined;
+}) {
+  const fallback = useMemo(
+    () => (message === undefined ? undefined : { message, streaming: false }),
+    [message],
+  );
+  const subscribe = useCallback(
+    (listener: () => void) => playback?.subscribeBubble(queueKey, listener) ?? (() => {}),
+    [playback, queueKey],
+  );
+  const read = useCallback(
+    () => playback?.getBubble(queueKey) ?? fallback,
+    [playback, queueKey, fallback],
+  );
+  const snapshot = useSyncExternalStore(subscribe, read);
+  useReplyHaptic(playback, queueKey, snapshot, focused);
+  return snapshot === undefined ? null : (
+    <MessageBubble
+      {...props}
+      rowKey={queueKey}
+      message={snapshot.message}
+      streaming={snapshot.streaming}
+    />
+  );
+});

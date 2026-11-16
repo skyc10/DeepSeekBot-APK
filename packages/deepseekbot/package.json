@@ -1,0 +1,39 @@
+{
+  "name": "deepseekbot",
+  "version": "0.0.0",
+  "private": true,
+  "description": "DeepSeekBot bundle: BotHarness core + web client, installed as one profile layer",
+  "bin": {
+    "botharness-profile": "./dist/profile-cli.mjs",
+    "deepseekbot": "./dist/deepseekbot.mjs",
+    "deepseekbot-zoom-setup": "./dist/desktop-zoom-setup.mjs"
+  },
+  "files": [
+    "dist",
+    "cordis.patch.yml",
+    "desktop-theme",
+    "desktop-theme-0.2.2-rc.1",
+    "desktop-theme-0.2.2-rc.2"
+  ],
+  "type": "module",
+  "dependencies": {
+    "@botharness/browser": "link:../browser",
+    "@botharness/computer": "link:../computer",
+    "@botharness/core": "link:../core",
+    "@botharness/ui": "link:../client"
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh": "0.2.2-rc.1"
+  },
+  "peerDependencies": {},
+  "engines": {
+    "dsh": ">=0.2.0-0",
+    "node": ">=22"
+  },
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

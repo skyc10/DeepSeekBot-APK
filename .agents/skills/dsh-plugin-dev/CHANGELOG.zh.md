@@ -1,0 +1,185 @@
+# DSH Skill 更新日志
+
+这里记录可安装 DSH/Cordis Context 与 Decision Tree 值得关注的变化。Skill SemVer 标识本
+artifact；DSH 版本与上游 revision 记录这些内容是基于什么版本完成核验的。
+
+## [Unreleased]
+
+独立于下游产品版本，准备下一个 DSH Skill release。
+
+### Documentation
+
+- 增加下游匿名 Bot Token 统计的验证路径及快照查询约定；稳定 DSH/Cordis Context、Decision Tree 及上游验证来源不变（[#4255](https://github.com/BotHarness/DeepSeekBot/issues/4255)）。
+
+- 增加下游首次 Tob 准备期间的设置响应性验证路径；稳定 DSH/Cordis Context、Decision Tree 及上游验证来源不变（[#4226](https://github.com/BotHarness/DeepSeekBot/issues/4226)）。
+
+- 补充下游相同登记的官方地址恢复与保护隐私的账号邀请诊断；稳定 DSH/Cordis Context、Decision Tree 及上游验证来源不变（[#4115](https://github.com/BotHarness/DeepSeekBot/issues/4115)）。
+
+- 下游远端 Bot CLI 验证路径与已验证的原生 Profile、模型、工作区及审批控件对齐；稳定 DSH/Cordis Context、Decision Tree 及上游验证来源不变（[#4118](https://github.com/BotHarness/DeepSeekBot/issues/4118)）。
+
+- 补充下游具名 Host 用量／存储路径及全新已发布149验证边界；稳定 DSH/Cordis Context、Decision Tree 及上游验证来源不变（[#4119](https://github.com/BotHarness/DeepSeekBot/issues/4119)）。
+
+- 补充下游具名环境设置的验证路径，入口与实际「更多操作 → 设置」一致；稳定 DSH/Cordis Context、Decision Tree 及上游验证来源不变（[#4117](https://github.com/BotHarness/DeepSeekBot/issues/4117)）。
+
+- 补充下游任务自有 Client 产物切换后，按当前公布的资源 revision 核验证据的方法；稳定 DSH/Cordis Context、Decision Tree 及上游验证来源不变（[#4114](https://github.com/BotHarness/DeepSeekBot/issues/4114)）。
+
+- 补充下游启动中断后空原生凭据写锁的所有权核验、任务所有者协调的同 Home 启动与恢复排他窗口，以及保留式恢复；操作见[恢复指南](../dsh-dev/SKILL.md)。稳定 DSH/Cordis Context、Decision Tree 及上游验证来源不变（[#4114](https://github.com/BotHarness/DeepSeekBot/issues/4114)）。
+
+- 补充下游已发布 Channel 权限146后的离线撤销、安全取消待批准关系与全新 generation147 验证要求；稳定 DSH/Cordis Context、Decision Tree 和上游验证来源不变（[#4113](https://github.com/BotHarness/DeepSeekBot/issues/4113)）。
+
+- 补充下游中断副本安装的显式恢复、旧依赖保留与共享文件保护要求；稳定 DSH Skill 版本及上游验证来源保持不变（[#4172](https://github.com/BotHarness/DeepSeekBot/issues/4172)）。
+
+- 记录下游隔离依赖副本、旧安装只读重启与已验证的共享文件元数据风险；稳定 DSH Skill 版本及上游验证来源保持不变（[#4135](https://github.com/BotHarness/BotHarness/issues/4135)）。
+
+- 在 [CLI 指南](../../../docs/bot-cli.md#reciprocal-computer-relationships) 中补充下游 Host 部分关系的独立方向检查、固定身份线路恢复与安全取消待批准关系；稳定 DSH/Cordis Context、Decision Tree 和上游验证来源不变（[#4112](https://github.com/BotHarness/DeepSeekBot/issues/4112)）。
+
+- 补充下游独立 GenUI 浏览器启动诊断、明确可执行文件选择与按路径配置的 CI 隔离权限；稳定 Context/Decision Tree 及已验证 DSH 来源不变（[#4030](https://github.com/BotHarness/DeepSeekBot/issues/4030)）。
+
+- 准备下游 Tobs 1.7.0 发布日志、版本亮点与候选包隐私复核指南；独立版本的 DSH Skill 及其已验证上游来源保持不变（[#4021](https://github.com/BotHarness/DeepSeekBot/issues/4021)）。
+
+- 补充下游 DSH 0.2.1 与 0.2.2 两代 API 的同产物验收要求；稳定 Skill 版本与上游验证来源不变（[#3477](https://github.com/BotHarness/DeepSeekBot/issues/3477)）。
+
+- 记录下游 RC 跟进流程及 0.2.2-rc.1 运行时适配检查；稳定 Context/Decision Tree Skill 的版本与已验证上游来源不变（[#3477](https://github.com/BotHarness/DeepSeekBot/issues/3477)）。
+
+- 补充下游响应式工作区归属与 DSH 0.2.2 center-column 兼容性陷阱；DSH/Cordis Context、Decision Tree 与 Skill 版本保持不变（[#3665](https://github.com/BotHarness/DeepSeekBot/issues/3665)）。
+
+- 准备下游 Tobs 1.6.1 发布记录；独立版本的 DSH Skill 及其已验证 DSH 来源不变（[#3214](https://github.com/BotHarness/DeepSeekBot/issues/3214)）。
+
+- 在验证 1.6.0 发布后同步下游 Tobs 安装指南；独立 Skill 版本与 DSH 来源不变（[#3195](https://github.com/BotHarness/DeepSeekBot/issues/3195)）。
+
+- 准备下游 Tobs 1.6.0 发布记录；独立版本的 DSH Skill 及其已验证 DSH 来源不变（[#3195](https://github.com/BotHarness/DeepSeekBot/issues/3195)）。
+
+- 在验证 1.5.2 发布后同步下游 Tobs 安装指南；独立 Skill 版本与 DSH 来源不变（[#2777](https://github.com/BotHarness/DeepSeekBot/issues/2777)）。
+
+- 准备下游 Tobs 1.5.2 发布记录；独立版本的 DSH Skill 及其已验证 DSH 来源不变（[#2777](https://github.com/BotHarness/DeepSeekBot/issues/2777)）。
+
+- 补充下游桌面缩放默认装载与旧手动配置清理说明；DSH/Cordis Context 和 Skill 行为不变 ([#2775](https://github.com/BotHarness/DeepSeekBot/issues/2775)).
+
+- 补充 Electron 桌面环境的 ASAR 文件系统行为，以及运行时复用所需的真实文件安装验证（[#2761](https://github.com/BotHarness/DeepSeekBot/issues/2761)）。
+
+- 将下游产品安装指南同步到已验证的 Tobs 1.5.1 包，区分新的命令与兼容入口；DSH/Cordis Context 和 Skill 行为不变（[#2751](https://github.com/BotHarness/DeepSeekBot/issues/2751)）。
+
+- 更新下游审批指南与验收路径，说明管理与设备操作的显式持久授权；DSH/Cordis Context 与 Skill 行为不变（[#2730](https://github.com/BotHarness/DeepSeekBot/issues/2730)）。
+
+- 补充 Profile 路径及参数检查、macOS/Linux 独立后台准备进程追踪，并明确 Windows 与环境继承的验证边界 ([#2713](https://github.com/BotHarness/DeepSeekBot/issues/2713)).
+
+- 补充安装与 Host 进程归属持久化、清理期间重复扫描及 Windows 独立 Home 并行的说明 ([#2713](https://github.com/BotHarness/DeepSeekBot/issues/2713)).
+
+- 补充整个 Home 的运行归属、启动失败清理及 Go 原生已修复时跳过补丁的说明 ([#2713](https://github.com/BotHarness/DeepSeekBot/issues/2713)).
+
+- 修正下游验证器的实际运行时诊断，移除产物及桌面 QA 残留版本门槛；Go 补丁使用实际适配器版本（[#2713](https://github.com/BotHarness/DeepSeekBot/issues/2713)）。
+
+- 移除下游开发启动的 rc 白名单，记录原生 Host 准入与可选缩放的协议检查（[#2713](https://github.com/BotHarness/DeepSeekBot/issues/2713)）；DSH Context 与 Skill 版本不变。
+
+- 更新[本地开发指南](../dsh-dev/SKILL.md)，使用 rc.3 开发版本，并保留桌面缩放与 Provider 的独立验证范围；DSH/Cordis Context 和 Skill 行为不变（[#2713](https://github.com/BotHarness/DeepSeekBot/issues/2713)）。
+
+- 新增下游 [Windows 到 Android 的 Local Computer 视频验证路径](../verify-deepseekbot/features/local-computer-video.md)，分别记录源码、本机呈现与 Human 验收；运行验证尚待完成，DSH/Cordis Context 保持不变（[#2558](https://github.com/BotHarness/DeepSeekBot/issues/2558)）。
+- 在[本地开发指南](../dsh-dev/SKILL.md)记录原生提问回答器的优先顺序，并以 DSH `0.2.1-rc.2` 核验；DSH／Cordis Context 与 Skill 行为保持不变（[#2590](https://github.com/BotHarness/DeepSeekBot/issues/2590)）。
+
+- 更新[下游 Panel 指南](../../../docs/panel-plugin.md)与真实 Web 验收路径，说明视图本地渲染、原生 dialog 切换和资源所有权；DSH／Cordis Context 与 Skill 行为保持不变（[#2222](https://github.com/BotHarness/DeepSeekBot/issues/2222)）。
+- 在[本地开发指南](../dsh-dev/SKILL.md)记录 Windows Desktop 候选激活、可执行文件与平台标识、物理键驱动限制及固定 Provider 来源校验，并补充[原生验证路径](../verify-deepseekbot/features/desktop-window-zoom.md)；DSH/Cordis Context 与 Decision Tree 保持不变（[#2270](https://github.com/BotHarness/DeepSeekBot/issues/2270)）。
+
+- 在[本地开发指南](../dsh-dev/SKILL.md)记录 rc.2 快捷键定义就绪时序与已归档 Session 导航核验，经真实 Web 升级和 Session 导航验证；DSH／Cordis Context 与 Skill 行为保持不变（[#2034](https://github.com/BotHarness/DeepSeekBot/issues/2034)）。
+
+- 在[本地开发指南](../dsh-dev/SKILL.md)记录生产工厂选项透传与新接收器真实事件核验，以 DSH `0.2.0-rc.2` Host 和固定提交的 dsh-im 普通文本候选核验；DSH／Cordis Context 与 Skill 行为保持不变（[#1155](https://github.com/BotHarness/DeepSeekBot/issues/1155)）。
+
+- 在[本地开发指南](../dsh-dev/SKILL.md)记录外部 Provider 导出的 Service 与逐账户主动发送能力核验，以 DSH `0.2.0-rc.2` Host 和 dsh-im `.20` 核验；DSH／Cordis Context 与 Skill 行为保持不变（[#1154](https://github.com/BotHarness/DeepSeekBot/issues/1154)）。
+
+- 在[本地开发指南](../dsh-dev/SKILL.md)记录 Windows pnpm 绝对补丁路径失败、隔离 CLI 内复制及真实 DM 复验，通过 DSH 0.2.0 RC1 核验；DSH／Cordis 词汇与 Skill 行为保持不变（[#1409](https://github.com/BotHarness/DeepSeekBot/issues/1409)）。
+
+- 在[本地开发指南](../dsh-dev/SKILL.md)记录流方法的 Host 拒绝会带错误码作为终止性 Remote 失败到达 Client，以及流与旧路由应编码同一帧源，以 DSH `0.2.0-rc.1` 上 `/api/remote.mux` 的认证拒绝核验；DSH／Cordis Context 与 Skill 行为不变（[#1500](https://github.com/BotHarness/DeepSeekBot/issues/1500)）。
+
+- 在[本地开发指南](../dsh-dev/SKILL.md)记录应用 Client 包如何声明 Gateway Client external 以使用 DSH 的 snapshot-stream 辅助类、所需的 Node 测试别名以及可重试结束的约定，以在 DSH `0.2.0-rc.1` 上启动真实 Client 并检查已发布的 `0.1.7-alpha.1`、`0.1.7-rc.2` 包核验；DSH／Cordis Context 与 Skill 行为不变（[#1498](https://github.com/BotHarness/DeepSeekBot/issues/1498)）。
+
+- 在[本地开发指南](../dsh-dev/SKILL.md)记录应用 SSE 与原生 HMR 共用的 HTTP/1.1 连接预算，以及源码声明的流式 Remote 方法路径（Host 标记、带 strict 参数 codec 的 Client contribution、namespace 读取、终止后重试），以认证的流打开和两个、三个真实同源页面在 DSH `0.2.0-rc.1` 上核验；DSH／Cordis Context 与 Skill 行为不变（[#1490](https://github.com/BotHarness/DeepSeekBot/issues/1490)）。
+
+- 将[本地开发指南](../dsh-dev/SKILL.md)中的受支持 Host 下限更新为 DSH `0.2.0` 及以上，以 DSH 原生兼容性预检对产品清单核验；DSH／Cordis Context 与 Skill 行为不变（[#1511](https://github.com/BotHarness/DeepSeekBot/issues/1511)）。
+
+- 将[本地开发指南](../dsh-dev/SKILL.md)的默认 CLI 与参考源码标签改为 DSH `0.2.0-rc.2`，以全新隔离 Web Profile、认证 API 和实际渲染的 Bot 模式核验；在 RC1 核验的 pitfall 条目保留原记录版本，DSH／Cordis Context 与 Skill 行为不变（[#1485](https://github.com/BotHarness/DeepSeekBot/issues/1485)）。
+- 在 [Client 诊断指南](../../../docs/dev/guides/client-startup-diagnostics.md)记录原生 RC1 两个文档的 HTTP/1 请求阻塞复现，以及 Roster／Activity 共用传输的生命周期；DSH／Cordis Context 与 Decision Tree 保持不变（[#1451](https://github.com/BotHarness/DeepSeekBot/issues/1451)）。
+
+- 在[本地开发指南](../dsh-dev/SKILL.md)记录有界 Windows→Linux Profile 路径迁移及非 root 工作区权限前提，以 pinned DSH `0.2.0-rc.1` 和真实隔离 Linux Host 核验；DSH／Cordis Context 与 Skill 行为不变（[#1386](https://github.com/BotHarness/DeepSeekBot/issues/1386)，[复验](../../../docs/research/2026-10-12-private-input-linux-qualification.md)）。
+
+- 记录受保护私密引用 MCP 消费路径、native 适配器／SDK 边界及可信服务器限制；DSH/Cordis Context 与 Skill 行为不变（[#1384](https://github.com/BotHarness/DeepSeekBot/issues/1384)，[指南](../../../docs/dev/guides/private-input-mcp.md)）。
+
+- 记录 Owner CLI 私密输入生命周期的等价操作，复用现有已认证 Host carrier；DSH／Cordis Context 与 Skill 行为保持不变（[#1416](https://github.com/BotHarness/DeepSeekBot/issues/1416)，[指南](../../../docs/dev/guides/private-input-cli.md)）。
+
+- 在[本地开发指南](../dsh-dev/SKILL.md)记录真实模型路由匹配、Request 请求体覆盖与 Windows 探针导入，已用 pinned RC1 Go 请求及被动探针回归验证；DSH/Cordis Context 不变（[#1383](https://github.com/BotHarness/DeepSeekBot/issues/1383)）。
+
+- 在[本地开发指南](../dsh-dev/SKILL.md)记录凭据提交后响应失败及启动恢复的写入顺序，通过 pinned RC1 原生 Provider 和私密账号回归测试核验；DSH／Cordis Context 不变（[#1382](https://github.com/BotHarness/DeepSeekBot/issues/1382)）。
+
+- 在[本地开发指南](../dsh-dev/SKILL.md)记录 RC1 新 Profile 初始化、原生 credential record 对象归属和恢复排空，通过 pinned 原生 Provider 与真实私密输入 Host 核验；DSH／Cordis 词汇及 Skill 行为不变（[#1381](https://github.com/BotHarness/DeepSeekBot/issues/1381)）。
+
+- 在[本地开发指南](../dsh-dev/SKILL.md)记录浏览器依赖延迟读取 Node 环境变量的问题、构建期浏览器常量及真实原生弹窗复验路径，通过 DSH 0.2.0 RC1 核验（[#1373](https://github.com/BotHarness/DeepSeekBot/issues/1373)）。
+
+- 在[本地开发指南](../dsh-dev/SKILL.md)记录 RC1 原生 MCP stdio 生命周期、共享 Scope 模块身份、Windows Subprocess argv 和 Registry 继承可见性陷阱，以并发原生 Agent Scope 和真实 Docker 核验；DSH／Cordis 词汇及 Skill 行为保持不变（[#1380](https://github.com/BotHarness/DeepSeekBot/issues/1380)）。
+
+- 在[本地开发指南](../dsh-dev/SKILL.md)记录 Windows 原生冷装中重复 localhost 开发刷新 SSE 导致进度不可见、显式刷新 opt-in、首窗口 CDP 就绪问题，以及 mark-of-web／隔离 binary 的实测结果，通过 DSH 0.2.0 RC1 与 Chrome 154.0.8037.57 核验（[#1339](https://github.com/BotHarness/DeepSeekBot/issues/1339)）。
+
+- 在[调试指南](../dsh-dev/references/debugging-playbook.md)记录经核验的 Cordis 诊断 exporter／Patch 插入要求、QQ 延迟就绪后的恢复检查及原因未明的原生 Client locale 截图失败，通过 DSH 0.2.0 RC1 检查；平台词汇与 Skill 行为不变（[#1156](https://github.com/BotHarness/DeepSeekBot/issues/1156)）。
+
+- 在[调试指南](../dsh-dev/references/debugging-playbook.md)记录隔离 RC2 timed question 的前台／持续问题区别、原生稍后回答接口复验、原始应用卡片不兼容及实测发现的应用运行生命周期陷阱；生产 RC1、DSH／Cordis Context 与 Decision Tree 保持不变（[#1220](https://github.com/BotHarness/DeepSeekBot/issues/1220), [report](../../../docs/research/1220-native-timed-question-experiment.md)）。
+
+- 在[调试指南](../dsh-dev/references/debugging-playbook.md)记录 RC1 原生 Human 等待持有当前 Agent Step、Inbox 接受与模型处理的区别，以及准确调用的决定／结果复验；DSH／Cordis Context 与 Decision Tree 保持不变（[#1036](https://github.com/BotHarness/DeepSeekBot/issues/1036), [#1220](https://github.com/BotHarness/DeepSeekBot/issues/1220)）。
+
+- 在[调试指南](../dsh-dev/references/debugging-playbook.md)记录 RC1 流式 GET 请求拒绝及真实认证 Host 复验路径；DSH／Cordis Context 与 Decision Tree 保持不变（[#886](https://github.com/BotHarness/DeepSeekBot/issues/886)）。
+
+- 在[本地开发指南](../dsh-dev/SKILL.md)记录主动读取真实 Client console／DOM、有界诊断、后台标签限制和原生 root／Session guard 精确复现，通过 DSH 0.2.0 RC1 核验；DSH／Cordis Context 与 Decision Tree 不变（[#1184](https://github.com/BotHarness/DeepSeekBot/issues/1184)）。
+
+- 在[本地开发指南](../dsh-dev/SKILL.md)记录 Windows 原生 Sandbox 初始化权限及已安装 ACL 诊断 Skill 的限定修复／复验路径，通过 DSH 0.2.0 RC1 实际原生 pwsh 等待命令核验；平台词汇与 Skill 行为不变（[#911](https://github.com/BotHarness/BotHarness/issues/911)）。
+
+- 在[调试指南](../dsh-dev/references/debugging-playbook.md)记录暂时 HTTP 拒绝后 EventSource 终态关闭及应用拥有的有界退避、恢复标识与清理，通过安装运行的 DSH 0.2.0 RC1 Profile 观察；平台词汇与认证归属保持不变（[#1141](https://github.com/BotHarness/DeepSeekBot/issues/1141)）。
+
+- 在[调试指南](../dsh-dev/references/debugging-playbook.md)记录 Windows AppData 物理路径、隔离 Profile 的包管理器资格核验、原生 Shell 结果检查及进程时间戳保护，通过 DSH 0.2.0 RC1 核验；平台词汇与 Skill 行为不变（[#1029](https://github.com/BotHarness/BotHarness/issues/1029)）。
+
+- 在[本地开发指南](../dsh-dev/SKILL.md)记录原生 Go 的 Session 请求头要求及经核验的 DSH 0.2.0 RC1 适配器补丁，通过真实模型调用和已保存 DM 回复验证；DSH／Cordis 词汇与 Skill 行为不变（[#1079](https://github.com/BotHarness/BotHarness/issues/1079), [AX 指南](../../../docs/agents/ax-model.md)）。
+
+- 链接应用定义的 Human Channel 媒体授权及候选 Lark 图片指南；DSH／Cordis 词汇、API Gateway 归属与 Skill 行为保持不变（[#1021](https://github.com/BotHarness/BotHarness/issues/1021), [指南](../../../docs/lark-connection.md), [ADR](../../../docs/adr/0135-human-bridge-media-uses-channel-source-authority.md)）。
+
+- 在[本地开发指南](../dsh-dev/SKILL.md)记录应用角色文件修改与已持久化 QA Session 中冻结指令的区别，通过 DSH 0.2.0 RC1 的真实模型事件核验；平台词汇与 Skill 行为不变（[#905](https://github.com/BotHarness/BotHarness/issues/905)）。
+
+- 更新下游 Discord 验证指南，记录真实来源删除分类缺陷、新的修复后模型来源／权限拒绝、原权限精确恢复、原生 App／Bot 与错误服务器边界及开发源码 @ 收件／回复资格验证；DSH 词汇与 Skill 行为保持不变（[#855](https://github.com/BotHarness/BotHarness/issues/855), [验证](../../../docs/dev/verification/discord-855-mention-reply.md)）。
+
+- 链接使用公共 DeepSeekBot 与 DSH 0.2.0 RC1 核验的下游 Channel sidebar 图文功能教程；平台词汇和 Skill 行为保持不变（[#893](https://github.com/BotHarness/BotHarness/issues/893), [教程](../../../docs/channel-sidebar/index.md)）。
+
+- 链接经 DSH 0.2.0 RC1 验证的下游公共 npm 图文安装、模型配置及非 IM 设置教程；平台词汇与 Skill 运行行为保持不变（[#887](https://github.com/BotHarness/BotHarness/issues/887), [教程](../../../docs/installation.md)）。
+
+- 引用下游 [npm prerelease 操作指南](../../../docs/npm-prerelease.md)，说明审阅过的预编译 Bundle 分发；平台词汇与 Skill 行为不变（[#866](https://github.com/BotHarness/BotHarness/issues/866)）。
+
+- 在[本地开发指南](../dsh-dev/SKILL.md)记录原生 Modal 与第三方引导浮层的键盘和焦点归属，通过独立安装的 DSH 0.2.0 RC1 打包 Client 和 Driver.js 1.4.0 验证（[#824](https://github.com/BotHarness/BotHarness/issues/824)）。
+- 在[调试手册](../dsh-dev/references/debugging-playbook.md)记录 DSH 优先从 CLI 安装位置解析 Bundle，以及 pnpm 12 产物覆盖配置的位置，已通过独立安装的官方 DSH 0.2.0 RC1 和真实打包 Client 组件列表验证（[#823](https://github.com/BotHarness/BotHarness/issues/823)）。
+- 在[本地开发指南](../dsh-dev/SKILL.md)记录隔离启动超时后遗留重复 Host 导致 operational writer 租约拒绝的情况；通过 DSH 0.2.0 RC1 的 Assignment 容量 QA 验证（[#811](https://github.com/BotHarness/BotHarness/issues/811)）。
+
+- 在[本地开发指南](../dsh-dev/SKILL.md)记录原生 Tool 批准与实际 Shell 执行需要分别取证；保留真实 Orchestrator 工作区拒绝，并在 DSH 0.2.0 RC1 验证已授权 Assignment 执行 ([#751](https://github.com/BotHarness/BotHarness/issues/751)).
+
+- 在[调试手册](../dsh-dev/references/debugging-playbook.md)记录外部回复连接与收件范围的区别，以固定 Provider 契约和独立绑定的回复身份检查（[#637](https://github.com/BotHarness/BotHarness/issues/637)）。
+
+- 在[本地开发指南](../dsh-dev/SKILL.md)记录 WebServer prefix 的斜杠匹配与原始 HTTP peer 边界，已核对固定 DSH 0.2.0 RC1 源码并通过真实扩展配对／观察流程验证（[#741](https://github.com/BotHarness/BotHarness/issues/741)）。
+
+- 在[本地开发指南](../dsh-dev/SKILL.md)记录 native configForms scope 方法的 receiver 绑定要求，并在固定 DSH 0.2.0 RC1 原生设置和 Host 重启后的 Browser Target 持久化中验证（[#726](https://github.com/BotHarness/BotHarness/issues/726)）。
+
+- 在[本地开发指南](../dsh-dev/SKILL.md)记录目录选择器的能力差异及原生选择回退，通过固定 DSH 0.2.0 RC1 的真实 Inbox Grant 流程验证（[#552](https://github.com/BotHarness/BotHarness/issues/552)）。
+
+- 在[本地开发指南](../dsh-dev/SKILL.md)记录原生审批探针必须位于 open Turn 的要求，已核对固定 DSH 0.2.0 RC1 源码，并通过真实 Browser 审批及取消 Turn 验证（[#460](https://github.com/BotHarness/BotHarness/issues/460)）。
+
+- 在[本地开发指南](../dsh-dev/SKILL.md)记录隔离 Provider 激活顺序、原生 Consumer 捕获 Policy 与真正的 Tool 执行边界，经固定 DSH 0.2.0 RC1 的原生文件与审批 Shell 调用验证（[#632](https://github.com/BotHarness/BotHarness/issues/632)）。
+
+- 在[本地开发指南](../dsh-dev/SKILL.md)澄清原生 token 投影的汇总字段及失败调用的请求路由归属，通过 DSH 0.2.0 RC1 的真实 Assignment 与子代理调用完成核验（[#503](https://github.com/BotHarness/BotHarness/issues/503)）。
+
+- 记录隔离开发 Profile 重启时保留可选 Bundle 的行为（[#117](https://github.com/BotHarness/BotHarness/issues/117)）。
+- 在[本地开发指南](../dsh-dev/SKILL.md)记录 provider token 分项的可选性及 Assistant 实际来源路由，避免把缺失报告当作零或估算用量（[#499](https://github.com/BotHarness/BotHarness/issues/499)）。
+- 在[本地开发指南](../dsh-dev/SKILL.md)记录应用预留的 Session ID 与已持久化 DSH Session 的区别，保证执行前拒绝在修复后可以重试（[#500](https://github.com/BotHarness/BotHarness/issues/500)）。
+
+- 为 DSH Skill 建立独立的双语 Release Ledger（[#102](https://github.com/BotHarness/BotHarness/issues/102)）。
+
+## [0.3.4] - 2026-09-20
+
+将可安装 skill 聚焦于稳定的 DSH/Cordis 术语与架构决策。
+
+- **Skill 版本：** `0.3.4`
+- **核验的 DSH 版本：** `dsh 0.1.6-alpha.2`
+- **上游 revision：** [`ddefc45fbc7f8e46dd73185e68295696d1297887`](https://github.com/deepseek-ai/deepseek-harness/commit/ddefc45fbc7f8e46dd73185e68295696d1297887)
+
+### Changed
+
+- 将 Context 与 Decision Tree 聚焦在稳定的 DSH/Cordis seam，并把版本相关 API 留给当前上游文档与源码核验（[#26](https://github.com/BotHarness/BotHarness/issues/26)）。

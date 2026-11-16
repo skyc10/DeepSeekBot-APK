@@ -1,0 +1,353 @@
+import type { ReactNode, Ref } from 'react';
+import type { Href } from 'expo-router';
+import { SourceMark, SourceName } from './source-name';
+import { Platform, Pressable, View, type ViewInstance } from 'react-native';
+
+import { BotAvatar } from '../bot-avatar';
+import type { HostLook } from '../design/host-look';
+import {
+  chatList,
+  conversationType,
+  edge,
+  environmentBadge,
+  radius,
+  space,
+} from '../design/tokens';
+import { useDesignTheme } from '../design/theme';
+import { CountBadge } from '../primitives/count-badge';
+import { Text } from '../primitives/text';
+import { useStrings } from '../strings';
+import { GroupMark } from './group-mark';
+import {
+  countBadge,
+  previewText,
+  rowLabel,
+  rowStatus,
+  shortTime,
+  titleOf,
+  type Conversation,
+  type RowStatus,
+} from './conversations';
+import { RowStatusGlyph } from './row-status-glyph';
+import { callRecordPreview } from './call-record-text';
+import {
+  AvatarSlot,
+  CONVERSATION_AVATAR as AVATAR,
+  CONVERSATION_RING as RING,
+} from './avatar-slot';
+import type { ConversationAction, ConversationActionKey } from './conversation-actions';
+import { ConversationPeek, type ConversationPeekAction } from '../shell/conversation-peek';
+import { showActionMenu } from '../primitives/app-dialog';
+
+export const AVATAR_EDGE = chatList.gutter;
+
+export function ConversationRow({
+  row,
+  now,
+  onPress,
+  actions = [],
+  onAction,
+  look,
+  sourceLabel,
+  previewHref,
+  menuActions: suppliedMenuActions,
+  onLongPress,
+  onMenu,
+}: {
+  row: Conversation;
+  now: Date;
+  look?: HostLook | undefined;
+  sourceLabel?: string | undefined;
+  previewHref?: Href | undefined;
+  menuActions?: readonly ConversationPeekAction[];
+  onLongPress?: (() => void) | undefined;
+  onMenu?: (() => void) | undefined;
+  onPress?: () => void;
+  actions?: readonly ConversationAction[];
+  onAction?: (key: ConversationActionKey) => void;
+}) {
+  const copy = useStrings();
+  const title = titleOf(row);
+  const status = rowStatus(row, now);
+  const latest = row.kind === 'bot' ? row.bot.preview : row.channel.preview;
+  const call = row.kind === 'bot' ? row.bot.previewCall : row.channel.previewCall;
+  const preview =
+    call === undefined ? previewText(latest, copy) : callRecordPreview(call, copy.call);
+  const badge = countBadge(row);
+  const time = shortTime(row.at ?? row.createdAt, now);
+  const summary = rowLabel(row, title, status, preview);
+  const description = time === '' ? summary : `${summary}, ${time}`;
+  const label = sourceLabel ? `${description}, ${sourceLabel}` : description;
+  const act = onAction ?? (() => undefined);
+  const availableActions = onAction ? actions : [];
+  const menuActions: readonly ConversationPeekAction[] =
+    suppliedMenuActions ??
+    availableActions.map((action) => ({
+      key: action.key,
+      label: action.label,
+      icon:
+        action.key === 'section'
+          ? 'folder'
+          : action.key === 'read'
+            ? 'checkmark'
+            : action.key === 'pin' || action.key === 'unpin'
+              ? 'pin'
+              : action.key === 'mute'
+                ? 'bell.slash'
+                : 'bell',
+      run: () => act(action.key),
+    }));
+  const avatar =
+    row.kind === 'bot' ? (
+      <ConversationBotAvatar bot={row.bot} />
+    ) : (
+      <ConversationGroupAvatar avatar={row.channel.avatar} />
+    );
+  const frame = (
+    <ConversationRowFrame
+      testID={`conversation-row-${row.key}`}
+      actions={onAction ? actions : []}
+      onAction={act}
+      title={title}
+      sourceLabel={sourceLabel}
+      source="computer"
+      look={look}
+      label={label}
+      preview={preview}
+      time={time}
+      status={status}
+      unread={row.unread > 0 && !row.muted}
+      badge={badge}
+      onPress={previewHref ? undefined : onPress}
+      onLongPress={
+        onLongPress ??
+        (Platform.OS === 'android' && availableActions.length > 0
+          ? () =>
+              showActionMenu(
+                title,
+                availableActions
+                  .filter((action) => action.key !== 'read')
+                  .map((action) => ({
+                    text: action.label,
+                    icon:
+                      action.key === 'read'
+                        ? ('check' as const)
+                        : action.key === 'section'
+                          ? ('folder' as const)
+                          : action.key,
+                    onPress: () => act(action.key),
+                  })),
+                avatar,
+              )
+          : undefined)
+      }
+      onMenu={onMenu}
+      avatar={avatar}
+    />
+  );
+  return previewHref ? (
+    <ConversationPeek href={previewHref} actions={menuActions}>
+      {frame}
+    </ConversationPeek>
+  ) : (
+    frame
+  );
+}
+
+export function ConversationBotAvatar({ bot }: { bot: Parameters<typeof BotAvatar>[0]['bot'] }) {
+  return (
+    <AvatarSlot>
+      <BotAvatar bot={bot} size={AVATAR} corner={radius.md} ring={false} />
+    </AvatarSlot>
+  );
+}
+
+export function ConversationGroupAvatar({ avatar }: { avatar?: string | undefined }) {
+  return (
+    <AvatarSlot>
+      <GroupMark avatar={avatar} size={AVATAR} corner={radius.md} variant="title" strong={false} />
+    </AvatarSlot>
+  );
+}
+
+export function ConversationRowFrame({
+  title,
+  sourceLabel,
+  source,
+  label,
+  preview,
+  time = '',
+  status = 'none',
+  unread = false,
+  badge,
+  avatar,
+  onPress,
+  onLongPress,
+  disabled = false,
+  actions = [],
+  onAction,
+  testID,
+  onMenu,
+  look,
+  ref,
+  mixed = sourceLabel !== undefined,
+}: {
+  mixed?: boolean;
+  sourceLabel?: string | undefined;
+  ref?: Ref<ViewInstance>;
+
+  look?: HostLook | undefined;
+  actions?: readonly ConversationAction[];
+  onAction?: (key: ConversationActionKey) => void;
+  title: string;
+  source: 'computer' | 'cloud';
+  label: string;
+  preview: string;
+  time?: string;
+  status?: RowStatus;
+  unread?: boolean;
+  badge?: ReturnType<typeof countBadge>;
+  avatar: ReactNode;
+  onPress?: (() => void) | undefined;
+  onLongPress?: (() => void) | undefined;
+  disabled?: boolean;
+  testID?: string;
+  onMenu?: (() => void) | undefined;
+}) {
+  const t = useStrings();
+  const theme = useDesignTheme();
+  const large = theme.largeText;
+  return (
+    <Pressable
+      ref={ref}
+      testID={testID}
+      onPress={onPress}
+      onLongPress={onLongPress}
+      disabled={disabled || onPress === undefined}
+      accessibilityRole={onPress === undefined ? undefined : 'button'}
+      accessibilityLabel={label}
+      accessibilityActions={[
+        ...actions.map((action) => ({ name: action.key, label: action.label })),
+        ...(onMenu ? [{ name: 'actions', label: t.deletion.actions(title) }] : []),
+      ]}
+      onAccessibilityAction={(event) => {
+        if (event.nativeEvent.actionName === 'actions') {
+          onMenu?.();
+          return;
+        }
+        const action = actions.find((item) => item.key === event.nativeEvent.actionName);
+        if (action) onAction?.(action.key);
+      }}
+      style={({ pressed }) => ({
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: space.x4,
+        minHeight: theme.touch,
+        paddingLeft: chatList.gutter - RING / 2,
+        paddingRight: chatList.gutter,
+        paddingVertical: space.x3,
+        backgroundColor: pressed ? theme.layer.canvas.pressed : theme.layer.canvas.fill,
+      })}
+    >
+      <View>
+        {avatar}
+        {badge === undefined || large ? null : (
+          <View
+            style={{
+              position: 'absolute',
+              top: -space.x1,
+              right: -space.x2,
+              padding: edge.focus,
+              borderRadius: radius.round,
+              backgroundColor: theme.layer.canvas.fill,
+            }}
+          >
+            <CountBadge count={badge.count} tone={badge.tone} compact />
+          </View>
+        )}
+        {mixed ? (
+          <View
+            accessibilityElementsHidden
+            importantForAccessibility="no-hide-descendants"
+            style={{
+              position: 'absolute',
+              bottom: -space.x1,
+              right: -space.x2,
+              padding: edge.focus,
+              borderRadius: radius.sm,
+              backgroundColor: theme.layer.canvas.fill,
+            }}
+          >
+            <View
+              style={{
+                width: environmentBadge.size,
+                height: environmentBadge.size,
+                borderRadius: radius.sm - edge.focus,
+                alignItems: 'center',
+                justifyContent: 'center',
+                backgroundColor: theme.layer.canvas.inset,
+              }}
+            >
+              <SourceMark
+                source={source}
+                look={look}
+                size={environmentBadge.size * environmentBadge.glyphRatio}
+              />
+            </View>
+          </View>
+        ) : null}
+      </View>
+      <View
+        key={`${theme.scheme}:${theme.fontScale}:${title}`}
+        style={{ flex: 1, minWidth: 0, gap: space.x1 }}
+      >
+        <View
+          style={{
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: space.x3,
+          }}
+        >
+          <SourceName
+            name={title}
+            source={source}
+            look={look}
+            sourceLabel={sourceLabel}
+            lines={large ? 2 : 1}
+            glyph={false}
+          />
+          {time === '' || large ? null : (
+            <Text variant="meta" tone="subtle" style={{ flexShrink: 0 }}>
+              {time}
+            </Text>
+          )}
+        </View>
+        {large && (time !== '' || badge !== undefined) ? (
+          <View
+            style={{ flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: space.x3 }}
+          >
+            {badge === undefined ? null : <CountBadge count={badge.count} tone={badge.tone} />}
+            {time === '' ? null : (
+              <Text variant="meta" tone="subtle">
+                {time}
+              </Text>
+            )}
+          </View>
+        ) : null}
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.x3 }}>
+          <Text
+            variant="meta"
+            dynamicTypeRamp="subheadline"
+            tone={unread ? 'fg' : 'muted'}
+            numberOfLines={1}
+            ellipsizeMode="tail"
+            style={[conversationType.preview, { flex: 1 }]}
+          >
+            {preview}
+          </Text>
+          <RowStatusGlyph status={status} />
+        </View>
+      </View>
+    </Pressable>
+  );
+}

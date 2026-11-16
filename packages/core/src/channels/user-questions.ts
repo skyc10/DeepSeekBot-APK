@@ -1,0 +1,810 @@
+import { TeamError } from '../team/error.js';
+import type { ApprovalAuthority, ApprovalDecider } from '../team/approval-contract.js';
+import { OWNER_HUMAN_CONTEXT, type HumanContext } from '../humans/context.js';
+import type { Context } from '@deepseek-ai/cordis';
+import { randomUUID } from 'node:crypto';
+
+import type { Agent } from '@deepseek-ai/dsh-agent';
+import type {
+  AskUserQuestionAnswer,
+  AskUserQuestionAnswerItem,
+  AskUserQuestionItem,
+  AskUserQuestionRequestEvent,
+} from '@deepseek-ai/dsh-user-questions/types';
+
+import { dmChannelId, type ChannelMessage } from './channel.js';
+import type { ChannelStore } from './store.js';
+import type { SessionOwnership } from '../sessions/ownership.js';
+import type { ToolApprovalActor } from '../workspaces/tool-approval.js';
+
+export interface ChannelQuestionRequest {
+  opaque?: boolean;
+  decidedBy?: ApprovalDecider;
+  sessionId: string;
+  callId?: string;
+  questions: AskUserQuestionItem[];
+}
+
+export type ChannelQuestionStatus = 'pending' | 'submitted' | 'answered' | 'expired';
+
+type NativeDelivery = (deliver: () => boolean) => Promise<boolean>;
+
+export interface TimedQuestionPort {
+  recordAnswer?(
+    sessionId: string,
+    callId: string,
+    answer: AskUserQuestionAnswer,
+    human: HumanContext,
+  ): void;
+  discardAnswer?(sessionId: string, callId: string): void;
+  answeringHuman?(
+    sessionId: string,
+    callId: string,
+    answer: AskUserQuestionAnswer,
+  ): HumanContext | undefined;
+  bind?(
+    sessionId: string,
+    channelId: string,
+    question: { messageId: string; callId: string },
+  ): NativeDelivery | undefined;
+  recover?(
+    sessionId: string,
+    channelId: string,
+    requestMessageId: string,
+  ): NativeDelivery | undefined;
+  available?(sessionId: string, channelId: string): boolean;
+  load?(sessionIds: readonly string[]): Promise<void>;
+  read(
+    sessionId: string,
+    callId: string,
+  ):
+    | { state: 'open' | 'continued' }
+    | { state: 'answered'; answer: AskUserQuestionAnswer }
+    | undefined;
+  answer(sessionId: string, callId: string, answer: AskUserQuestionAnswer): boolean;
+}
+
+export interface ChannelQuestionCard {
+  channelId: string;
+  messageId: string;
+}
+
+export interface ChannelQuestionResolution {
+  requestMessageId: string;
+  state: 'answered' | 'cancelled';
+  answers?: AskUserQuestionAnswerItem[];
+  actor?: ToolApprovalActor;
+  decidedBy?: ApprovalDecider;
+}
+
+export interface ChannelQuestionNotice extends ChannelQuestionRequest {
+  botSlug: string;
+  channelId: string;
+  groupName?: string;
+  messageId: string;
+}
+
+type Pending = {
+  answeringHuman: HumanContext | undefined;
+  agent: Agent | undefined;
+  sessionId: string;
+  botSlug: string;
+  channelId: string;
+  groupName?: string;
+  questions: AskUserQuestionItem[];
+  signal?: AbortSignal;
+  resolve(answer: AskUserQuestionAnswer): void;
+  reject(reason: Error): void;
+  abort(): void;
+  deciding: boolean;
+  committed: boolean;
+  callId?: string;
+  deferred: boolean;
+  submitted: boolean;
+  deliverNative?: NativeDelivery | undefined;
+};
+
+function validAnswer(questions: AskUserQuestionItem[], answer: AskUserQuestionAnswer): boolean {
+  if (!Array.isArray(answer.answers) || answer.answers.length !== questions.length) return false;
+  const seen = new Set<string>();
+  for (const item of answer.answers) {
+    if (typeof item !== 'object' || item === null) return false;
+    const question = questions.find((entry) => entry.id === item.id);
+    if (question === undefined || seen.has(item.id)) return false;
+    seen.add(item.id);
+    if (!Array.isArray(item.selected) || !item.selected.every((label) => typeof label === 'string'))
+      return false;
+    if (new Set(item.selected).size !== item.selected.length) return false;
+    if (question.multiSelect !== true && item.selected.length > 1) return false;
+    if (question.multiSelect !== true && item.selected.length > 0 && item.custom !== undefined)
+      return false;
+    const offered = new Set(question.options?.map((option) => option.label) ?? []);
+    if (item.selected.some((label) => !offered.has(label))) return false;
+    if (
+      item.custom !== undefined &&
+      (typeof item.custom !== 'string' || item.custom.trim().length === 0)
+    )
+      return false;
+    if (item.selected.length === 0 && item.custom === undefined) return false;
+  }
+  return true;
+}
+
+export class ChannelUserQuestions {
+  readonly #channels: ChannelStore;
+  readonly #ownership: SessionOwnership;
+  readonly #isLive: (agent: Agent) => boolean;
+  readonly #warn: (message: string) => void;
+  readonly #changed: (slug: string, count: number) => void;
+  readonly #pending = new Map<string, Pending>();
+  readonly #listeners = new Set<() => void>();
+  readonly #observers = new Set<
+    (notice: ChannelQuestionNotice, status: 'pending' | 'answered' | 'cancelled') => void
+  >();
+  readonly #timed: TimedQuestionPort | undefined;
+  readonly #askChannel: ((sessionId: string) => string | undefined) | undefined;
+
+  constructor(
+    channels: ChannelStore,
+    ownership: SessionOwnership,
+    isLive: (agent: Agent) => boolean = () => true,
+    warn: (message: string) => void = () => undefined,
+    changed: (slug: string, count: number) => void = () => undefined,
+    timed?: TimedQuestionPort,
+    askChannel?: (sessionId: string) => string | undefined,
+    private readonly approvals?: ApprovalAuthority,
+  ) {
+    this.#askChannel = askChannel;
+    this.#channels = channels;
+    this.#ownership = ownership;
+    this.#isLive = isLive;
+    this.#warn = warn;
+    this.#changed = changed;
+    this.#timed = timed;
+  }
+
+  async ask(request: AskUserQuestionRequestEvent): Promise<AskUserQuestionAnswer | undefined> {
+    const agent = request.agent;
+    if (agent === undefined) return undefined;
+    const owner = this.#ownership.resolve(agent.session.id);
+    if (owner?.rootRole !== 'orchestrator' || !this.#isLive(agent)) return undefined;
+    const origin = this.#askChannel?.(agent.session.id);
+    const originChannel = origin === undefined ? undefined : this.#channels.get(origin);
+    const channelId =
+      originChannel?.type === 'group' && originChannel.members.includes(owner.botSlug)
+        ? originChannel.id
+        : dmChannelId(owner.botSlug);
+    const channel = this.#channels.get(channelId);
+    if (channel === undefined) return undefined;
+    if (channel.type !== 'group' && channel.botSlug !== owner.botSlug) return undefined;
+    if (request.signal?.aborted) throw new Error('DSH user question was cancelled');
+    const questions = request.questions.map((question) => ({
+      ...question,
+      ...(question.options === undefined
+        ? {}
+        : { options: question.options.map((option) => ({ ...option })) }),
+    }));
+    if (questions.length === 0) return undefined;
+    const wait = 'wait' in request ? request.wait : undefined;
+    const callId =
+      this.#timed !== undefined &&
+      typeof wait === 'object' &&
+      wait !== null &&
+      'timed' in wait &&
+      wait.timed === true &&
+      'callId' in wait &&
+      typeof wait.callId === 'string' &&
+      wait.callId.length > 0
+        ? wait.callId
+        : undefined;
+    const message: ChannelMessage = {
+      id: randomUUID(),
+      at: new Date().toISOString(),
+      author: { kind: 'bot', slug: owner.botSlug },
+      body: questions.map((question) => question.question).join('\n'),
+      userQuestionRequest: {
+        sessionId: agent.session.id,
+        questions,
+        ...(callId === undefined ? {} : { callId }),
+      },
+    };
+    let resolve!: (answer: AskUserQuestionAnswer) => void;
+    let reject!: (reason: Error) => void;
+    const answer = new Promise<AskUserQuestionAnswer>((yes, no) => {
+      resolve = yes;
+      reject = no;
+    });
+
+    void answer.catch(() => undefined);
+    const pending: Pending = {
+      answeringHuman: undefined,
+      agent,
+      sessionId: agent.session.id,
+      botSlug: owner.botSlug,
+      channelId,
+      ...(channel.type === 'group' ? { groupName: channel.name } : {}),
+      questions,
+      ...(request.signal === undefined ? {} : { signal: request.signal }),
+      resolve,
+      reject,
+      abort: () => {
+        const reason: unknown = request.signal?.reason;
+        if (callId !== undefined) {
+          pending.deferred = true;
+          pending.reject(
+            reason instanceof Error ? reason : new Error('Native question foreground ended'),
+          );
+        } else this.#cancel(message.id);
+      },
+      deciding: false,
+      committed: false,
+      ...(callId === undefined ? {} : { callId }),
+      deferred: false,
+      submitted: false,
+      ...(callId === undefined || this.#timed?.bind === undefined
+        ? {}
+        : {
+            deliverNative: this.#timed.bind(agent.session.id, channelId, {
+              messageId: message.id,
+              callId,
+            }),
+          }),
+    };
+    this.#pending.set(message.id, pending);
+    request.signal?.addEventListener('abort', pending.abort, { once: true });
+    try {
+      if (
+        (await this.#channels.appendMessage(OWNER_HUMAN_CONTEXT, channelId, message)) === undefined
+      )
+        return undefined;
+      if (this.#pending.get(message.id) === pending) {
+        pending.committed = true;
+        if (this.status(pending.botSlug, message.id) === 'pending')
+          this.#publishAttention(pending.botSlug);
+        if (this.#pending.get(message.id) === pending)
+          this.#observe(message.id, pending, 'pending');
+      }
+      return await answer;
+    } finally {
+      request.signal?.removeEventListener('abort', pending.abort);
+      if (this.#pending.get(message.id) === pending && (!pending.deferred || !pending.committed)) {
+        this.#pending.delete(message.id);
+        if (pending.committed) this.#publishAttention(pending.botSlug);
+      }
+    }
+  }
+
+  activeMessageIds(): string[] {
+    return [...this.#pending]
+      .filter(([messageId, pending]) =>
+        ['pending', 'submitted'].includes(this.status(pending.botSlug, messageId)),
+      )
+      .map(([messageId]) => messageId);
+  }
+
+  requests(botSlug: string): ChannelQuestionNotice[] {
+    return [...this.#pending].flatMap(([messageId, pending]) =>
+      pending.botSlug === botSlug &&
+      pending.committed &&
+      ['pending', 'submitted'].includes(this.status(botSlug, messageId))
+        ? [
+            {
+              botSlug,
+              channelId: pending.channelId,
+              ...(pending.groupName === undefined ? {} : { groupName: pending.groupName }),
+              messageId,
+              sessionId: pending.sessionId,
+              ...(pending.callId === undefined ? {} : { callId: pending.callId }),
+              questions: pending.questions.map((question) => ({
+                ...question,
+                ...(question.options === undefined
+                  ? {}
+                  : {
+                      options: question.options.map((option) => ({ ...option })),
+                    }),
+              })),
+            },
+          ]
+        : [],
+    );
+  }
+
+  subscribe(listener: () => void): () => void {
+    this.#listeners.add(listener);
+    return () => {
+      this.#listeners.delete(listener);
+    };
+  }
+
+  observe(
+    listener: (notice: ChannelQuestionNotice, status: 'pending' | 'answered' | 'cancelled') => void,
+  ): () => void {
+    this.#observers.add(listener);
+    return () => {
+      this.#observers.delete(listener);
+    };
+  }
+
+  pending(botSlug: string, messageId: string): ChannelQuestionNotice | undefined {
+    return this.requests(botSlug).find((notice) => notice.messageId === messageId);
+  }
+
+  activeSessionIds(): string[] {
+    return this.activeMessageIds().flatMap((id) => {
+      const pending = this.#pending.get(id);
+      return pending === undefined ? [] : [pending.sessionId];
+    });
+  }
+
+  status(
+    botSlug: string,
+    messageId: string,
+    channelId = dmChannelId(botSlug),
+    includeHistory = true,
+  ): ChannelQuestionStatus {
+    const pending = this.#pending.get(messageId);
+    if (pending === undefined) {
+      if (!includeHistory) return 'expired';
+      const message = this.#channels.message(channelId, messageId);
+      if (message?.userQuestionRequest === undefined) return 'expired';
+      let before: string | undefined;
+      while (true) {
+        const messages = this.#channels.readMessages(channelId, {
+          limit: 200,
+          ...(before === undefined ? {} : { before }),
+        });
+        if (
+          messages.some(
+            (entry) =>
+              entry.userQuestionResolution?.requestMessageId === messageId &&
+              entry.userQuestionResolution.state === 'answered',
+          )
+        )
+          return 'answered';
+        if (messages.length === 0 || messages.some((entry) => entry.id === messageId))
+          return 'expired';
+        before = messages.at(-1)!.id;
+      }
+    }
+    if (pending.botSlug !== botSlug || !this.#holds(messageId, pending)) return 'expired';
+    if (pending.deferred && pending.callId !== undefined) {
+      const native = this.#timed?.read(pending.sessionId, pending.callId);
+      if (native === undefined) {
+        this.#cancel(messageId);
+        return 'expired';
+      }
+      if (native.state === 'answered') return 'answered';
+      if (pending.submitted) return 'submitted';
+    }
+    return 'pending';
+  }
+
+  async answer(
+    botSlug: string,
+    messageId: string,
+    answer: AskUserQuestionAnswer,
+    human: HumanContext,
+    external?: { actor: ToolApprovalActor; authorized(): boolean },
+  ): Promise<boolean> {
+    const pending = this.#pending.get(messageId);
+    if (
+      pending === undefined ||
+      pending.botSlug !== botSlug ||
+      pending.deciding ||
+      pending.submitted ||
+      (external !== undefined && !pending.committed)
+    )
+      return false;
+    this.approvals?.requireRequest(human, pending.channelId, messageId);
+    if (external && !external.authorized()) return false;
+    if (!this.#holds(messageId, pending)) return false;
+    if (!validAnswer(pending.questions, answer)) return false;
+    if (
+      this.#channels
+        .readMessages(pending.channelId)
+        .some((message) => message.userQuestionResolution?.requestMessageId === messageId)
+    )
+      return false;
+    pending.deciding = true;
+    let phase = 'channel-commit';
+    try {
+      if (pending.deferred && pending.callId !== undefined) {
+        const timed = this.#timed;
+        const callId = pending.callId;
+        const state = timed?.read(pending.sessionId, callId)?.state;
+        if (
+          timed === undefined ||
+          (state !== 'continued' && (state !== 'open' || pending.agent !== undefined))
+        )
+          return false;
+        try {
+          const submit = (): boolean => {
+            if (
+              this.#pending.get(messageId) !== pending ||
+              !this.#holds(messageId, pending) ||
+              timed.read(pending.sessionId, callId)?.state !== 'continued'
+            )
+              return false;
+            this.approvals?.requireRequest(human, pending.channelId, messageId);
+            phase = 'native-receipt';
+            timed.recordAnswer?.(pending.sessionId, callId, answer, human);
+            try {
+              phase = 'native-submit';
+              const accepted = timed.answer(pending.sessionId, callId, answer);
+              if (!accepted) timed.discardAnswer?.(pending.sessionId, callId);
+              else pending.answeringHuman = human;
+              return accepted;
+            } catch (error) {
+              timed.discardAnswer?.(pending.sessionId, callId);
+              throw error;
+            }
+          };
+          const deliver =
+            pending.deliverNative ??
+            (pending.agent === undefined
+              ? timed.recover?.(pending.sessionId, pending.channelId, messageId)
+              : undefined);
+          pending.submitted =
+            deliver === undefined
+              ? timed.bind === undefined && timed.recover === undefined
+                ? submit()
+                : false
+              : await deliver(submit);
+          return pending.submitted;
+        } catch (error) {
+          if (error instanceof TeamError) throw error;
+          this.#answerFailure(messageId, pending, phase, error);
+          this.#warn(`botharness.channel_question.late_answer_refused request=${messageId}`);
+          return false;
+        }
+      }
+      if (pending.callId !== undefined) {
+        this.approvals?.requireRequest(human, pending.channelId, messageId);
+        phase = 'native-receipt';
+        this.#timed?.recordAnswer?.(pending.sessionId, pending.callId, answer, human);
+        pending.answeringHuman = human;
+        pending.deferred = true;
+        pending.submitted = true;
+        pending.resolve(answer);
+        return true;
+      }
+      const decision: ChannelMessage = {
+        id: randomUUID(),
+        at: new Date().toISOString(),
+        author: { kind: 'human' },
+        body: answer.answers.map((item) => item.custom ?? item.selected.join(', ')).join('\n'),
+        replyTo: messageId,
+        userQuestionResolution: {
+          requestMessageId: messageId,
+          state: 'answered',
+          answers: answer.answers,
+          decidedBy: this.approvals?.decider(human) ?? { humanId: human.humanId },
+          ...(external ? { actor: external.actor } : {}),
+        },
+      };
+      if (
+        (await this.#channels.appendMessage(human, pending.channelId, decision, undefined, () => {
+          this.approvals?.requireRequest(human, pending.channelId, messageId);
+          return external
+            ? this.#pending.get(messageId) === pending && external.authorized()
+            : true;
+        })) === undefined
+      )
+        return false;
+      if (this.#pending.get(messageId) !== pending || pending.signal?.aborted) return false;
+      this.#pending.delete(messageId);
+      this.#publishAttention(pending.botSlug);
+      pending.signal?.removeEventListener('abort', pending.abort);
+      pending.resolve(answer);
+      this.#observe(messageId, pending, 'answered');
+      return true;
+    } catch (error) {
+      if (!(error instanceof TeamError)) this.#answerFailure(messageId, pending, phase, error);
+      throw error;
+    } finally {
+      pending.deciding = false;
+      if (pending.deferred && pending.submitted)
+        void this.reconcileSession(pending.sessionId).catch(() =>
+          this.#warn('user-question-reconciliation-failed'),
+        );
+    }
+  }
+
+  reconcile(botSlug: string, messageId: string): boolean {
+    const pending = this.#pending.get(messageId);
+    if (
+      !pending?.committed ||
+      pending.deciding ||
+      pending.deferred ||
+      pending.botSlug !== botSlug ||
+      this.status(botSlug, messageId, pending.channelId) !== 'pending'
+    )
+      return false;
+    const resolution = this.#channels
+      .readMessages(pending.channelId)
+      .find(
+        (message) => message.userQuestionResolution?.requestMessageId === messageId,
+      )?.userQuestionResolution;
+    if (
+      resolution?.state !== 'answered' ||
+      !resolution.answers ||
+      !validAnswer(pending.questions, { answers: resolution.answers })
+    )
+      return false;
+    this.#pending.delete(messageId);
+    this.#publishAttention(botSlug);
+    pending.signal?.removeEventListener('abort', pending.abort);
+    pending.resolve({ answers: resolution.answers });
+    this.#observe(messageId, pending, 'answered');
+    return true;
+  }
+
+  cancelSession(sessionId: string): void {
+    for (const [id, pending] of this.#pending) {
+      if (pending.sessionId !== sessionId) continue;
+      if (pending.callId === undefined) this.#cancel(id);
+      else this.#detach(pending);
+    }
+  }
+
+  async recover(cards: readonly ChannelQuestionCard[]): Promise<void> {
+    const sessions = new Set<string>();
+    const bots = new Set<string>();
+    const stored = cards.flatMap((card) => {
+      const request = this.#channels.message(card.channelId, card.messageId)?.userQuestionRequest;
+      return request?.callId === undefined ? [] : [request.sessionId];
+    });
+    await this.#timed?.load?.([...new Set(stored)]);
+    for (const card of cards) {
+      if (this.#pending.has(card.messageId)) continue;
+      const message = this.#channels.message(card.channelId, card.messageId);
+      const request = message?.userQuestionRequest;
+      if (request?.callId === undefined || message?.author.kind !== 'bot') continue;
+      const botSlug = message.author.slug;
+      const owner = this.#ownership.resolve(request.sessionId);
+      const channel = this.#channels.get(card.channelId);
+      if (
+        owner?.rootRole !== 'orchestrator' ||
+        owner.botSlug !== botSlug ||
+        channel === undefined ||
+        (channel.type === 'group'
+          ? !channel.members.includes(botSlug)
+          : channel.botSlug !== botSlug)
+      )
+        continue;
+      if (
+        this.#timed === undefined ||
+        this.#timed.read(request.sessionId, request.callId) === undefined ||
+        this.#timed.available?.(request.sessionId, card.channelId) === false
+      )
+        continue;
+      this.#pending.set(card.messageId, {
+        answeringHuman: undefined,
+        agent: undefined,
+        sessionId: request.sessionId,
+        botSlug,
+        channelId: card.channelId,
+        ...(channel.type === 'group' ? { groupName: channel.name } : {}),
+        questions: request.questions,
+        resolve: () => undefined,
+        reject: () => undefined,
+        abort: () => undefined,
+        deciding: false,
+        committed: true,
+        callId: request.callId,
+        deferred: true,
+        submitted: false,
+      });
+      sessions.add(request.sessionId);
+      bots.add(botSlug);
+    }
+    for (const slug of bots) this.#publishAttention(slug);
+    for (const sessionId of sessions) await this.reconcileSession(sessionId);
+  }
+
+  async reconcileSession(sessionId: string): Promise<void> {
+    for (const [id, pending] of this.#pending) {
+      if (
+        pending.sessionId !== sessionId ||
+        !pending.deferred ||
+        pending.callId === undefined ||
+        pending.deciding
+      )
+        continue;
+      if (!this.#holds(id, pending)) continue;
+      const native = this.#timed?.read(pending.sessionId, pending.callId);
+      if (native === undefined) this.#cancel(id);
+      else if (native.state === 'answered' && validAnswer(pending.questions, native.answer)) {
+        pending.deciding = true;
+        try {
+          const answeringHuman =
+            this.#timed?.answeringHuman?.(pending.sessionId, pending.callId, native.answer) ??
+            pending.answeringHuman;
+          const saved = await this.#channels.reconcileQuestionAnswer(
+            answeringHuman,
+            pending.channelId,
+            {
+              messageId: id,
+              sessionId: pending.sessionId,
+              callId: pending.callId,
+            },
+            native.answer,
+          );
+          if (saved !== undefined && this.#pending.get(id) === pending) {
+            this.#pending.delete(id);
+            this.#publishAttention(pending.botSlug);
+          }
+        } finally {
+          pending.deciding = false;
+        }
+      }
+    }
+  }
+
+  discardReply(sessionId: string, callId: string): void {
+    for (const pending of this.#pending.values())
+      if (pending.sessionId === sessionId && pending.callId === callId) {
+        this.#timed?.discardAnswer?.(sessionId, callId);
+        pending.submitted = false;
+        pending.answeringHuman = undefined;
+      }
+  }
+
+  #answerFailure(messageId: string, pending: Pending, phase: string, error: unknown): void {
+    const kind =
+      error instanceof TypeError
+        ? 'type'
+        : error instanceof RangeError
+          ? 'range'
+          : error instanceof Error
+            ? 'error'
+            : 'non-error';
+    const frames =
+      error instanceof Error
+        ? (error.stack ?? '')
+            .split('\n')
+            .slice(1, 7)
+            .flatMap((line) => {
+              const name = /^\s*at\s+([\w.$<>]+)(?:\s|$)/u.exec(line)?.[1];
+              return name ? [name] : [];
+            })
+            .join(',')
+        : '';
+    this.#warn(
+      `botharness.channel_question.answer_failed method=userQuestionAnswer phase=${phase} kind=${kind} request=${messageId} session=${pending.sessionId} frames=${frames}`,
+    );
+  }
+
+  #publishAttention(slug: string): void {
+    const count = [...this.#pending.values()].filter(
+      (pending) => pending.botSlug === slug && pending.committed,
+    ).length;
+    try {
+      this.#changed(slug, count);
+    } catch {
+      this.#warn('user-question-attention-publication-failed');
+    }
+    for (const listener of this.#listeners) {
+      try {
+        listener();
+      } catch {
+        this.#warn('user-question-notice-publication-failed');
+      }
+    }
+  }
+
+  close(): void {
+    for (const [id, pending] of this.#pending) {
+      if (pending.callId === undefined) this.#cancel(id);
+      else {
+        this.#pending.delete(id);
+        pending.signal?.removeEventListener('abort', pending.abort);
+        pending.reject(new Error('DSH user question was cancelled'));
+      }
+    }
+  }
+
+  #detach(pending: Pending): void {
+    if (pending.agent === undefined) return;
+    pending.agent = undefined;
+    pending.deferred = true;
+    pending.signal?.removeEventListener('abort', pending.abort);
+    pending.reject(new Error('DSH user question foreground ended'));
+  }
+
+  #holds(messageId: string, pending: Pending): boolean {
+    const owner = this.#ownership.resolve(pending.sessionId);
+    if (pending.agent !== undefined && !this.#isLive(pending.agent)) {
+      if (pending.callId === undefined) {
+        this.#cancel(messageId);
+        return false;
+      }
+      this.#detach(pending);
+    }
+    if (
+      (!pending.deferred && pending.signal?.aborted) ||
+      owner?.rootRole !== 'orchestrator' ||
+      owner.botSlug !== pending.botSlug ||
+      (pending.agent === undefined &&
+        this.#timed?.available?.(pending.sessionId, pending.channelId) === false)
+    ) {
+      this.#cancel(messageId);
+      return false;
+    }
+    return true;
+  }
+
+  #observe(
+    messageId: string,
+    pending: Pending,
+    status: 'pending' | 'answered' | 'cancelled',
+  ): void {
+    for (const listener of this.#observers) {
+      try {
+        listener(
+          {
+            botSlug: pending.botSlug,
+            channelId: pending.channelId,
+            ...(pending.groupName === undefined ? {} : { groupName: pending.groupName }),
+            messageId,
+            sessionId: pending.sessionId,
+            ...(pending.callId === undefined ? {} : { callId: pending.callId }),
+            questions: pending.questions,
+          },
+          status,
+        );
+      } catch {
+        this.#warn('user-question-notification-failed');
+      }
+    }
+  }
+
+  cancelChannel(channelId: string): void {
+    for (const [messageId, pending] of this.#pending)
+      if (pending.channelId === channelId) this.#cancel(messageId, false);
+  }
+
+  #cancel(messageId: string, record = true): void {
+    const pending = this.#pending.get(messageId);
+    if (pending === undefined) return;
+    this.#pending.delete(messageId);
+    if (pending.committed) this.#publishAttention(pending.botSlug);
+    pending.signal?.removeEventListener('abort', pending.abort);
+    if (!record) {
+      pending.reject(new Error('DSH user question was cancelled because the group was disbanded'));
+      return;
+    }
+    const resolution: ChannelMessage = {
+      id: randomUUID(),
+      at: new Date().toISOString(),
+      author: { kind: 'bot', slug: pending.botSlug },
+      body: '提问已取消',
+      replyTo: messageId,
+      userQuestionResolution: { requestMessageId: messageId, state: 'cancelled' },
+    };
+
+    void this.#channels.appendMessage(OWNER_HUMAN_CONTEXT, pending.channelId, resolution).then(
+      (saved) => {
+        if (saved === undefined)
+          this.#warn(`botharness.channel_question.cancel_append_failed request=${messageId}`);
+        else this.#observe(messageId, pending, 'cancelled');
+      },
+      () => this.#warn(`botharness.channel_question.cancel_append_failed request=${messageId}`),
+    );
+    pending.reject(new Error('DSH user question was cancelled'));
+  }
+}
+
+export function registerChannelUserQuestions(
+  ctx: Context,
+  questions: Pick<ChannelUserQuestions, 'ask'>,
+): void {
+  ctx.on(
+    'user-questions/request',
+    async (request, next) => (await questions.ask(request)) ?? next(),
+    {
+      global: true,
+      prepend: true,
+    },
+  );
+}

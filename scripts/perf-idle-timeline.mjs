@@ -1,0 +1,508 @@
+import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { parseArgs } from 'node:util';
+import { checkBudget, readBudget } from './perf-budget.mjs';
+import { openTimelineConversation } from './perf-timeline-navigation.mjs';
+import { createHeapObservation } from './perf-heap-observation.mjs';
+import { installTimelineActivity, timelineActivityPlan } from './perf-timeline-activity.mjs';
+import {
+  assertNativeViewportUnchanged,
+  calibrateNativeViewport,
+  observeForegroundTimelineScroll,
+  readNativeViewport,
+} from './foreground-timeline-scroll.mjs';
+
+export const usage = `Usage: node scripts/perf-idle-timeline.mjs [options]
+
+Measures how much main-thread work an open, idle Bot mode Group conversation costs,
+and how fast typing in its composer is. Targets a task-owned Host:
+BH_E2E_INSTANCE=.humanlayer/verify/<name>/instance.json (from verify-app launch).
+
+  --messages <n>      Messages to seed in a new Group (default 600). Ignored with --fixture.
+  --fixture <file>    Reuse a Group seeded by an earlier run (its fixture.json).
+  --load-all          Scroll to the top until the whole history is mounted (default on).
+  --no-load-all       Keep only the opening window mounted.
+  --seconds <n>       Idle measurement window (default 15).
+  --animate           Add one small infinite CSS animation, standing in for Tob or a
+                      working indicator, after scrolling (legacy idle-only protocol).
+  --animate-scroll    Start that animation before scrolling; requires --animate,
+                      --foreground-scroll and --headed. Recorded as a distinct protocol.
+  --trace             Save a Chrome trace of the idle window (open in DevTools).
+  --heap-observe <s>   Separate diagnostic: raw boundary samples and 1–60 seconds of
+                      untouched observation AFTER the unchanged canonical endpoint.
+                      Requires --trace, without --profile; never forces GC or changes the heap budget.
+  --headed            Open a real foreground browser instead of the headless diagnostic default.
+  --foreground-scroll Record trusted wheel input, visible-gap samples and a compositor trace;
+                      requires --headed. rAF diagnostics are not presented FPS.
+  --profile           Save a CPU profile of the idle window and list the hottest functions.
+  --scroll-check      After mounting, scroll from the latest message to the top one viewport at a
+                      time and report scroll jumps and blank gaps left in view (on by
+                      default with --load-all; --no-scroll-check turns it off).
+  --budget <file>     Check the summary against a budget (scripts/perf-budgets/timeline.json)
+                      and exit 1 when a structure budget fails. Timing budgets only warn.
+  --strict-timing     With --budget, timing budgets fail too (use on a quiet machine).
+  --label <name>      Evidence label (default "run"); use main/fix for AB pairs.
+  --out <dir>         Evidence directory (default .humanlayer/perf/idle-timeline).
+
+Prints one JSON summary on stdout and writes <label>.json next to any trace/profile.`;
+
+const { values: options } = parseArgs({
+  options: {
+    messages: { type: 'string', default: '600' },
+    fixture: { type: 'string' },
+    'load-all': { type: 'boolean', default: true },
+    'no-load-all': { type: 'boolean', default: false },
+    seconds: { type: 'string', default: '15' },
+    animate: { type: 'boolean', default: false },
+    'animate-scroll': { type: 'boolean', default: false },
+    trace: { type: 'boolean', default: false },
+    'heap-observe': { type: 'string' },
+    headed: { type: 'boolean', default: false },
+    'foreground-scroll': { type: 'boolean', default: false },
+    profile: { type: 'boolean', default: false },
+    'scroll-check': { type: 'boolean', default: true },
+    'no-scroll-check': { type: 'boolean', default: false },
+    budget: { type: 'string' },
+    'strict-timing': { type: 'boolean', default: false },
+    label: { type: 'string', default: 'run' },
+    out: { type: 'string', default: '.humanlayer/perf/idle-timeline' },
+    help: { type: 'boolean', default: false },
+  },
+});
+if (options.help) {
+  console.log(usage);
+  process.exit(0);
+}
+
+const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+assert.ok(!options['foreground-scroll'] || options.headed, '--foreground-scroll requires --headed');
+const activity = timelineActivityPlan({
+  animate: options.animate,
+  animateScroll: options['animate-scroll'],
+  foregroundScroll: options['foreground-scroll'],
+  headed: options.headed,
+});
+const heapObservationSeconds =
+  options['heap-observe'] === undefined ? 0 : Number(options['heap-observe']);
+assert.ok(
+  options['heap-observe'] === undefined ||
+    (options.trace &&
+      !options.profile &&
+      Number.isInteger(heapObservationSeconds) &&
+      heapObservationSeconds >= 1 &&
+      heapObservationSeconds <= 60),
+  '--heap-observe requires --trace, no --profile, and 1–60 seconds',
+);
+const store = resolve(root, 'node_modules/.pnpm');
+const pkg = readdirSync(store).find((name) => name.startsWith('puppeteer@'));
+const puppeteer = createRequire(resolve(store, pkg, 'node_modules/'))('puppeteer');
+assert.ok(process.env.BH_E2E_INSTANCE, 'Set BH_E2E_INSTANCE to the task-owned instance.json');
+const instance = JSON.parse(readFileSync(process.env.BH_E2E_INSTANCE, 'utf8'));
+const out = resolve(options.out);
+mkdirSync(out, { recursive: true });
+const seconds = Number(options.seconds);
+const loadAll = options['load-all'] && !options['no-load-all'];
+const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
+
+const bodies = [
+  (i) => `Status ${i}: the build passed. Next I will **review the diff** and report back.`,
+  (i) =>
+    `Plan for item ${i}:\n\n1. Read \`packages/client/src/client/bot-main.tsx\`\n2. Measure the idle cost\n3. Compare with main\n\n> Note: keep the change small and reversible.`,
+  (i) =>
+    `Here is the snippet for ${i}:\n\n\`\`\`ts\nexport function sum(values: readonly number[]): number {\n  let total = 0;\n  for (const value of values) total += value;\n  return total;\n}\n\`\`\`\n\nIt runs in O(n).`,
+  (i) =>
+    `| Metric | Before | After |\n| --- | --- | --- |\n| Task ${i} | 108% | 4% |\n| Heap | 1.1 GB | 300 MB |\n\nSee [the issue](https://github.com/BotHarness/DeepSeekBot/issues/2413).`,
+  (i) =>
+    `Short reply ${i}. 中文内容也要覆盖：这条消息用来测试中英文混排的渲染成本，以及较长段落的换行。`,
+];
+
+async function scrollCheck() {
+  const result = await page.$eval('.bh-chat-body', async (body) => {
+    const frame = () => new Promise((done) => requestAnimationFrame(() => done(undefined)));
+    const topOf = (id) => {
+      for (const node of body.querySelectorAll('[data-message-id]'))
+        if (node.dataset.messageId === id) return node.getBoundingClientRect().top;
+      return undefined;
+    };
+    const firstVisible = () => {
+      const top = body.getBoundingClientRect().top;
+      for (const node of body.querySelectorAll('[data-message-id]')) {
+        const bounds = node.getBoundingClientRect();
+        if (bounds.bottom > top) return { id: node.dataset.messageId, y: bounds.top };
+      }
+      return undefined;
+    };
+    body.scrollTop = body.scrollHeight;
+    await frame();
+    await frame();
+    let steps = 0;
+    let jumps = 0;
+    let maxJumpPx = 0;
+    let gapsInView = 0;
+    let emptyInView = 0;
+    while (body.scrollTop > 0 && steps < 2000) {
+      body.scrollTop = Math.max(0, body.scrollTop - body.clientHeight);
+      steps += 1;
+      await frame();
+      const before = firstVisible();
+      await frame();
+      await frame();
+      const after = before === undefined ? undefined : topOf(before.id);
+      if (before !== undefined && after !== undefined) {
+        const moved = Math.abs(after - before.y);
+        if (moved > 1) {
+          jumps += 1;
+          maxJumpPx = Math.max(maxJumpPx, moved);
+        }
+      }
+      const view = body.getBoundingClientRect();
+      for (const block of body.querySelectorAll('.bh-message-block, .bh-timeline-gap')) {
+        const bounds = block.getBoundingClientRect();
+        if (bounds.bottom <= view.top || bounds.top >= view.bottom) continue;
+        if (block.classList.contains('bh-timeline-gap')) gapsInView += 1;
+        else if (bounds.height === 0) emptyInView += 1;
+      }
+    }
+    body.scrollTop = body.scrollHeight;
+    await frame();
+    return { steps, jumps, maxJumpPx: Math.round(maxJumpPx), gapsInView, emptyInView };
+  });
+  await sleep(1000);
+  return result;
+}
+
+const browser = await puppeteer.launch({
+  headless: !options.headed,
+  args: ['--no-sandbox', '--lang=en-US', '--enable-precise-memory-info'],
+  protocolTimeout: 600_000,
+});
+const page = await browser.newPage();
+const localeSession = await page.createCDPSession();
+await localeSession.send('Emulation.setUserAgentOverride', {
+  userAgent: await browser.userAgent(),
+  acceptLanguage: 'en-US,en',
+});
+const errors = [];
+page.on('pageerror', (error) => errors.push(error.message));
+
+async function rpc(method, args = {}) {
+  return page.evaluate(
+    async (method, args) => {
+      const response = await fetch(`/api/botharness/${method}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          type: 'client-request',
+          rpcId: crypto.randomUUID(),
+          method: `botharness/${method}`,
+          payload: { args },
+        }),
+      });
+      const envelope = await response.json();
+      if (!envelope.result?.ok) throw Error(`${method}: ${JSON.stringify(envelope.result)}`);
+      return envelope.result.value;
+    },
+    method,
+    args,
+  );
+}
+
+async function dismissOverlays() {
+  for (let index = 0; index < 6; index++) {
+    for (const label of [
+      'Continue',
+      'Configure later',
+      'Skip tutorial',
+      'Skip',
+      'Don’t show again',
+    ]) {
+      const button = await page.$(`::-p-aria(${label})`);
+      if (button && (await button.isVisible().catch(() => false)))
+        await button.click().catch(() => {});
+    }
+    await sleep(150);
+  }
+}
+
+async function seed(count) {
+  const bots = [];
+  for (const name of ['Perf Ada', 'Perf Lin', 'Perf Kai'])
+    bots.push((await rpc('create', { displayName: `${name} ${Date.now() % 100000}` })).bot);
+  const group = (
+    await rpc('channelCreate', {
+      name: `Idle perf ${count}`,
+      members: bots.map((bot) => bot.slug),
+    })
+  ).channel;
+  for (const bot of bots)
+    await rpc('channelGroupWakeSet', {
+      channelId: group.id,
+      botSlug: bot.slug,
+      mode: 'silent',
+      count: 5,
+      intervalSeconds: 30,
+    });
+  const ids = [];
+  let source;
+  for (let index = 0; index < count; index++) {
+    if (index % 5 === 0) {
+      const sent = await rpc('channelSend', {
+        channelId: group.id,
+        body: `Human check-in ${index + 1}: how is it going?`,
+      });
+      source = sent.message?.id ?? sent.messageId ?? sent.id;
+      assert.ok(source, JSON.stringify(sent));
+      ids.push(source);
+      continue;
+    }
+    const bot = bots[index % bots.length];
+    const run = await rpc('botToolRun', {
+      slug: bot.slug,
+      tool: 'bot_send_message',
+      args: {
+        channel_id: group.id,
+        body: bodies[index % bodies.length](index + 1),
+        reply_to: source,
+      },
+    });
+    assert.ok(run.result?.messageId, JSON.stringify(run));
+    ids.push(run.result.messageId);
+    if ((index + 1) % 100 === 0) console.error(`seeded ${index + 1}/${count}`);
+  }
+  await rpc('channelMarkRead', { channelId: group.id, messageId: ids.at(-1) });
+  return { channelId: group.id, messageIds: ids, bots: bots.map((bot) => bot.slug) };
+}
+
+async function startProfile(cdp) {
+  await cdp.send('Profiler.enable');
+  await cdp.send('Profiler.setSamplingInterval', { interval: 200 });
+  await cdp.send('Profiler.start');
+}
+
+async function stopProfile(cdp, phase) {
+  const { profile } = await cdp.send('Profiler.stop');
+  writeFileSync(resolve(out, `${options.label}.${phase}.cpuprofile`), JSON.stringify(profile));
+  const self = new Map();
+  const byId = new Map(profile.nodes.map((node) => [node.id, node]));
+  profile.samples.forEach((id, index) => {
+    const frame = byId.get(id).callFrame;
+    if (['(idle)', '(program)', '(root)'].includes(frame.functionName)) return;
+    const key = `${frame.functionName || '(anonymous)'} ${frame.url.split(/[/?&]/).find((part) => /\.m?js$/.test(part)) ?? ''}:${frame.lineNumber + 1}`;
+    self.set(key, (self.get(key) ?? 0) + (profile.timeDeltas[index] ?? 0) / 1000);
+  });
+  return [...self]
+    .sort((left, right) => right[1] - left[1])
+    .slice(0, 12)
+    .map(([name, ms]) => ({ name, ms: Math.round(ms) }));
+}
+
+const metric = (list, name) => list.metrics.find((item) => item.name === name)?.value ?? 0;
+
+try {
+  const startupNativeViewport = options.headed ? await calibrateNativeViewport(page) : undefined;
+  if (!options.headed) await page.setViewport({ width: 1440, height: 900 });
+  await page.goto(instance.url, { waitUntil: 'networkidle2' });
+  await dismissOverlays();
+
+  const fixture = options.fixture
+    ? JSON.parse(readFileSync(options.fixture, 'utf8'))
+    : await seed(Number(options.messages));
+  if (!options.fixture) writeFileSync(resolve(out, 'fixture.json'), JSON.stringify(fixture));
+
+  await page.reload({ waitUntil: 'networkidle2' });
+  await dismissOverlays();
+  const diagnosticCdp = heapObservationSeconds ? await page.createCDPSession() : undefined;
+  if (diagnosticCdp) await diagnosticCdp.send('Performance.enable', { timeDomain: 'timeTicks' });
+  const heapObservation = diagnosticCdp ? createHeapObservation(diagnosticCdp) : undefined;
+  await heapObservation?.sample('before-conversation');
+  await openTimelineConversation(page, fixture.channelId, dismissOverlays);
+  await sleep(1500);
+  await heapObservation?.sample('conversation-open');
+  const nativeViewport = options.headed ? await readNativeViewport(page) : undefined;
+
+  if (loadAll) {
+    let mounted = 0;
+    for (let attempt = 0; attempt < 200; attempt++) {
+      await page.$eval('.bh-chat-body', (node) => {
+        node.scrollTop = 0;
+      });
+      await page.waitForFunction(
+        (previous) =>
+          Number(document.querySelector('.bh-chat-body')?.dataset.loadedMessages ?? 0) > previous,
+        { timeout: 30_000 },
+        mounted,
+      );
+      const now = await page.$eval('.bh-chat-body', (node) =>
+        Number(node.dataset.loadedMessages ?? node.querySelectorAll('[data-message-id]').length),
+      );
+      if (now >= fixture.messageIds.length) break;
+      mounted = now;
+    }
+    await page.$eval('.bh-chat-body', (node) => {
+      node.scrollTop = node.scrollHeight;
+    });
+  }
+  await heapObservation?.sample('history-loaded');
+  if (activity.phase === 'before-scroll') await installTimelineActivity(page);
+  const scroll =
+    loadAll && options['scroll-check'] && !options['no-scroll-check']
+      ? await scrollCheck()
+      : undefined;
+  const foregroundScroll = options['foreground-scroll']
+    ? await observeForegroundTimelineScroll(
+        page,
+        resolve(out, `${options.label}.scroll.trace.json`),
+        { requireAnimation: activity.phase === 'before-scroll' },
+      )
+    : undefined;
+  if (nativeViewport && foregroundScroll) {
+    for (const sample of foregroundScroll.samples) {
+      assert.ok(sample.viewport, 'Each foreground sample must record its actual viewport.');
+      assertNativeViewportUnchanged(nativeViewport, { ...nativeViewport, ...sample.viewport });
+    }
+  }
+  await heapObservation?.sample('scroll-finished');
+  if (activity.phase === 'after-scroll')
+    await installTimelineActivity(page, { waitUntilRunning: false });
+  await sleep(3000);
+
+  const cdp = await page.createCDPSession();
+  await cdp.send('Performance.enable', { timeDomain: 'timeTicks' });
+  if (options.profile) await startProfile(cdp);
+  const traceFile = resolve(out, `${options.label}.trace.json`);
+  if (options.trace)
+    await page.tracing.start({
+      path: traceFile,
+      categories: ['devtools.timeline', 'disabled-by-default-devtools.timeline', 'blink', 'cc'],
+    });
+  const before = await cdp.send('Performance.getMetrics');
+  await heapObservation?.sample('idle-start', before);
+  const started = Date.now();
+  await sleep(seconds * 1000);
+  const after = await cdp.send('Performance.getMetrics');
+  const elapsed = (Date.now() - started) / 1000;
+  await heapObservation?.sample('canonical-endpoint', after);
+  if (heapObservation) {
+    await heapObservation.extend(heapObservationSeconds);
+    writeFileSync(
+      resolve(out, `${options.label}.heap-observation.json`),
+      JSON.stringify(
+        {
+          unit: 'bytes',
+          extensionSeconds: heapObservationSeconds,
+          canonicalBudgetUnchanged: true,
+          samples: heapObservation.samples,
+        },
+        null,
+        2,
+      ),
+    );
+  }
+  if (options.trace) await page.tracing.stop();
+  const idleHottest = options.profile ? await stopProfile(cdp, 'idle') : undefined;
+  const delta = (name) => metric(after, name) - metric(before, name);
+  const dom = await page.evaluate(() => ({
+    loadedMessages: Number(
+      document.querySelector('.bh-chat-body')?.dataset.loadedMessages ??
+        document.querySelectorAll('.bh-chat-body [data-message-id]').length,
+    ),
+    mountedMessages: document.querySelectorAll('.bh-chat-body [data-message-id]').length,
+    nodes: document.getElementsByTagName('*').length,
+    timelineGaps: document.querySelectorAll('.bh-chat-body .bh-timeline-gap').length,
+  }));
+
+  await page.$eval('.bh-chat-body', (node) => {
+    node.scrollTop = node.scrollHeight;
+  });
+  const composer = '.bh-chat-pane .bh-composer [contenteditable="true"], .bh-chat-pane textarea';
+  await page.waitForSelector(composer);
+  await page.focus(composer);
+  await page.evaluate(() => {
+    window.__perfEvents = [];
+    new PerformanceObserver((list) => {
+      for (const entry of list.getEntries())
+        if (['keydown', 'keypress', 'input', 'keyup'].includes(entry.name))
+          window.__perfEvents.push(entry.duration);
+    }).observe({ type: 'event', durationThreshold: 16, buffered: false });
+  });
+  if (options.profile) await startProfile(cdp);
+  const typedBefore = await cdp.send('Performance.getMetrics');
+  await page.keyboard.type('the quick brown fox jumps over the lazy dog', { delay: 60 });
+  await sleep(500);
+  const typedAfter = await cdp.send('Performance.getMetrics');
+  const typingHottest = options.profile ? await stopProfile(cdp, 'typing') : undefined;
+  const typed = (name) => metric(typedAfter, name) - metric(typedBefore, name);
+  const typing = await page.evaluate(() => {
+    const sorted = [...window.__perfEvents].sort((a, b) => a - b);
+    const at = (q) => sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))] ?? 0;
+    return { slowEvents: sorted.length, p50: at(0.5), p95: at(0.95), max: sorted.at(-1) ?? 0 };
+  });
+  await page.keyboard.down('Control');
+  await page.keyboard.press('KeyA');
+  await page.keyboard.up('Control');
+  await page.keyboard.press('Backspace');
+  const nativeViewportAtEnd = options.headed ? await readNativeViewport(page) : undefined;
+  if (nativeViewport) assertNativeViewportUnchanged(nativeViewport, nativeViewportAtEnd);
+
+  const summary = {
+    label: options.label,
+    channelId: fixture.channelId,
+    seeded: fixture.messageIds.length,
+    animate: options.animate,
+    activity,
+    seconds: Number(elapsed.toFixed(1)),
+    ...dom,
+    mainThreadBusyPct: Number(((delta('TaskDuration') / elapsed) * 100).toFixed(1)),
+    scriptMs: Math.round(delta('ScriptDuration') * 1000),
+    layoutMs: Math.round(delta('LayoutDuration') * 1000),
+    recalcStyleMs: Math.round(delta('RecalcStyleDuration') * 1000),
+    layouts: delta('LayoutCount'),
+    styleRecalcs: delta('RecalcStyleCount'),
+    frames: delta('FrameCount') || undefined,
+    heapMB: Math.round(metric(after, 'JSHeapUsedSize') / 1e6),
+    heapObservation: heapObservation ? `${options.label}.heap-observation.json` : undefined,
+    typing: {
+      ...typing,
+      scriptMs: Math.round(typed('ScriptDuration') * 1000),
+      layoutMs: Math.round(typed('LayoutDuration') * 1000),
+      recalcStyleMs: Math.round(typed('RecalcStyleDuration') * 1000),
+      hottest: typingHottest,
+    },
+    scroll,
+    headed: options.headed,
+    startupNativeViewport,
+    nativeViewport,
+    nativeViewportAtEnd,
+    foregroundScroll,
+    idleHottest,
+    trace: options.trace ? traceFile : undefined,
+    pageErrors: errors,
+  };
+  writeFileSync(resolve(out, `${options.label}.json`), JSON.stringify(summary, null, 2));
+  console.log(JSON.stringify(summary, null, 2));
+  if (foregroundScroll && !foregroundScroll.correctnessPass) process.exitCode = 1;
+  if (options.budget) {
+    const check = checkBudget(summary, readBudget(options.budget), {
+      strictTiming: options['strict-timing'],
+    });
+    writeFileSync(resolve(out, `${options.label}.budget.json`), JSON.stringify(check, null, 2));
+    for (const result of check.results)
+      console.error(
+        `${result.pass ? 'ok  ' : result.blocking ? 'FAIL' : 'warn'} ${result.metric} = ${result.actual}` +
+          `${result.max === undefined ? '' : ` (max ${result.max})`}` +
+          `${result.min === undefined ? '' : ` (min ${result.min})`} ${result.why ?? ''}`,
+      );
+    console.error(`budget ${check.budget} (${check.mode}): ${check.pass ? 'pass' : 'FAIL'}`);
+    if (!check.pass) process.exitCode = 1;
+  }
+} catch (error) {
+  const shot = resolve(out, `${options.label}.failure.png`);
+  await page.screenshot({ path: shot }).catch(() => {});
+  console.error(`perf run failed; page screenshot: ${shot}`);
+  throw error;
+} finally {
+  await browser.close();
+}

@@ -1,0 +1,1074 @@
+import type {
+  PersonaBotAttention,
+  PersonaBotSessionActivity,
+} from '../../../core/src/state/bot-state.js';
+import type { PersonaBotToolActivity } from '../../../core/src/state/tool-activity.js';
+import type { PersonaBotActivityState } from './avatar.js';
+import type { AvatarAppearance } from '../../../core/src/bots/avatar-appearance.js';
+import type { BotPrimaryColor } from '../../../core/src/bots/primary-color.js';
+import type { GitAvailability } from './bridge.js';
+import type { RosterConfig } from './roster-config.js';
+import type { RosterSection, TopOrderEntry } from './roster.js';
+import type { PurgedPlacement } from '../../../core/src/purge/contracts.js';
+import type { PixelBannerRecipe } from '@botharness/pixel-banner';
+import { createContentRedactions, sameItems } from './content-redactions.js';
+import { ActivitySmoother } from './activity-smoothing.js';
+
+export type ClientMode = 'dsh' | 'bot';
+
+export type ClientStatus = 'idle' | 'loading' | 'ready' | 'error';
+
+export interface StandingLimitsView {
+  soul: number;
+  coreMemory: number;
+}
+
+export type BotBannerView = { recipe: PixelBannerRecipe } | { image: string };
+
+export interface BotSummary {
+  sharedBy?: string;
+  lastActivityAt?: number;
+  slug: string;
+  displayName: string;
+  tob?: { defaultName: boolean; defaultAvatar: boolean };
+  roles: string[];
+  description?: string;
+  avatar?: string;
+  appearance?: AvatarAppearance;
+  appearanceUnsupported?: true;
+  banner?: BotBannerView;
+  primaryColor?: BotPrimaryColor;
+  avatarSeed?: 2;
+  paused?: boolean;
+  modelAllowed?: false;
+  deleted?: boolean;
+  standingLimits?: StandingLimitsView;
+  aggregateState: string;
+  activity?: PersonaBotToolActivity;
+  attention?: PersonaBotAttention;
+  sessionActivity?: readonly PersonaBotSessionActivity[];
+  workspaces: string[];
+  createdAt: string;
+}
+
+export interface ChannelHumanMember {
+  humanId: string;
+  displayName: string;
+}
+
+export interface ChannelSummary {
+  remoteAvailability?: 'available' | 'unavailable' | 'withdrawn' | 'bot-unavailable';
+  humanMembers?: ChannelHumanMember[];
+  humanParticipants?: string[];
+  humanNickname?: string | null;
+  id: string;
+  type: 'dm' | 'group';
+  name: string;
+  avatar?: string;
+  members: string[];
+  botSlug?: string;
+  remoteBot?: { hostId: string; botSlug: string; displayName: string };
+  remoteContact?: {
+    hostId: string;
+    botSlug: string;
+    displayName: string;
+    description?: string;
+    device: { model: string | null; platform: string | null };
+    capabilities: string[];
+  };
+  ownerBotSlug?: string;
+  readOnly?: boolean;
+  proactiveOptOut?: boolean;
+  memberBots?: Array<{ slug: string; displayName: string; avatar?: string }>;
+  wakePolicies?: Record<
+    string,
+    {
+      mode: 'all' | 'mentions' | 'digest' | 'silent';
+      count: number;
+      intervalSeconds: number;
+      revision: number;
+    }
+  >;
+  joinRequests?: Array<{
+    id: string;
+    requesterBotSlug: string;
+    status: 'pending' | 'accepted' | 'declined' | 'cancelled';
+    createdAt: string;
+    decidedAt?: string;
+    decidedBy?: string;
+  }>;
+  invitations?: Array<{
+    id: string;
+    targetBotSlug: string;
+    inviterBotSlug?: string;
+    inviterHuman?: true;
+    status: 'pending' | 'accepted' | 'declined' | 'cancelled';
+    createdAt: string;
+    respondedAt?: string;
+  }>;
+  createdAt: string;
+  updatedAt: string;
+  latestMessage?: ChannelMessage;
+}
+
+export type ChannelAuthor =
+  | { kind: 'human'; humanId?: string; displayName?: string; deleted?: boolean }
+  | { kind: 'bot'; slug: string; displayName?: string }
+  | { kind: 'remote-bot'; hostId: string; slug: string }
+  | { kind: 'bridged'; source: string }
+  | { kind: 'system' };
+
+export interface ChannelReplyPreview {
+  author: ChannelAuthor;
+  body: string;
+  media?: import('../../../core/src/channels/reply-preview.js').ChannelReplyPreviewMedia<ChannelAttachmentRef>;
+}
+
+export type ChannelAttachmentRef = {
+  name: string;
+  mime: string;
+  size: number;
+  version?: string;
+  width?: number;
+  height?: number;
+  thumbhash?: string;
+} & ({ fileId: string; hash?: never } | { hash: string; fileId?: never });
+
+export interface BotCreatePreview {
+  memoryFolder: string;
+  defaultLocation: boolean;
+  avatar?: string;
+  avatarError?: string;
+}
+
+export interface ToolApprovalRequestCard {
+  approvalReview?: import('../../../core/src/workspaces/tool-approval.js').ToolApprovalReview;
+  allowAlways?: boolean;
+  sessionId: string;
+  callId: string;
+  toolName: string;
+  role: 'orchestrator' | 'assignment';
+  cwd: string;
+  input: string;
+  botCreatePreview?: BotCreatePreview;
+}
+
+export type ApprovalCardView = import('../../../core/src/team/approval-contract.js').ApprovalCard;
+
+export interface ToolApprovalDecision {
+  requestMessageId: string;
+  outcome:
+    | 'allowed-once'
+    | 'allowed-always-tool'
+    | 'allowed-always-exact'
+    | 'allowed-always-all'
+    | 'rejected';
+}
+
+export interface UserQuestionOption {
+  label: string;
+  description?: string;
+}
+
+export interface UserQuestionItem {
+  id: string;
+  question: string;
+  detail?: string;
+  header?: string;
+  options?: UserQuestionOption[];
+  multiSelect?: boolean;
+}
+
+export interface UserQuestionAnswerItem {
+  id: string;
+  selected: string[];
+  custom?: string;
+}
+
+export interface UserQuestionRequestCard {
+  callId?: string;
+  sessionId: string;
+  questions: UserQuestionItem[];
+}
+
+export interface UserQuestionResolution {
+  requestMessageId: string;
+  state: 'answered' | 'cancelled';
+  answers?: UserQuestionAnswerItem[];
+}
+
+export interface SessionFailureCard {
+  requestMessageId?: string;
+  role: 'orchestrator' | 'assignment';
+  sessionId: string;
+  code?: string;
+  status?: number;
+  detail: string;
+  context?: string;
+  progress?: import('../shared/turn-continuation.js').SessionFailureProgress;
+  autoContinue?: import('../shared/turn-continuation.js').SessionFailureAutoContinue;
+}
+
+export interface ChannelReaction {
+  emoji: string;
+  actors: { kind: 'human' | 'bot'; id: string }[];
+}
+
+export interface ChannelMessage {
+  genui?: ReturnType<typeof import('../../../core/src/channels/genui.js').parseGenuiContent>;
+  genuiUnavailable?: true;
+  genuiReply?: import('../../../core/src/channels/genui.js').GenuiMessageReply;
+  onboardingWelcome?: { version: 1; kind?: 'tob' };
+  contentPurged?: true;
+  bridgeOrigin?: import('../../../core/src/channels/channel.js').ChannelMessage['bridgeOrigin'];
+  bridgeMedia?: import('../../../core/src/channels/channel.js').ChannelMessage['bridgeMedia'];
+  id: string;
+  at: string;
+  author: ChannelAuthor;
+  body: string;
+  memorySwitchTarget?: string;
+  mentions?: { botSlug: string; label: string; start: number; end: number }[];
+  humanMentions?: { humanId: string; label: string; start: number; end: number }[];
+  channelRefs?: { channelId: string; label: string; start: number; end: number }[];
+  skillInvocations?: import('../../../core/src/channels/channel.js').ChannelSkillInvocation[];
+  humanReceipts?: {
+    humanId: string;
+    displayName: string;
+    state: 'unread' | 'read';
+  }[];
+  channelRevision?: number;
+  reactions?: ChannelReaction[];
+  deliveries?: {
+    botSlug: string;
+    state:
+      | 'pending'
+      | 'observed'
+      | 'running'
+      | 'retryable'
+      | 'needs-repair'
+      | 'handled'
+      | 'ignored';
+  }[];
+  botDmAction?: { channelId: string; messageId: string; recipientBotSlug: string };
+  botCreateAction?: { botSlug: string; displayName: string };
+  botChannelPost?: { channelId: string; messageId: string };
+  botChannelPostPreview?: string | null;
+  noticeOrigin?: { channelId: string };
+  memoryCommit?: {
+    botSlug: string;
+    sha: string;
+    subject: string;
+    authorName: string;
+    authoredAt: string;
+    files: Array<{ path: string; added: number | null; deleted: number | null }>;
+    moreFiles: number;
+  };
+  turnStop?: {
+    botName: string;
+    humanName: string;
+    target?:
+      | { scope: 'bot' }
+      | { scope: 'session'; role: 'orchestrator' | 'assignment'; title?: string };
+    held?: boolean;
+    cause?: 'human-stop' | 'failures';
+    failures?: number;
+  };
+  toolAutoApproval?: import('../../../core/src/channels/channel.js').ChannelToolAutoApproval;
+  voiceCallRecord?: import('../../../core/src/channels/voice-call-record.js').ChannelVoiceCallRecord;
+  toolAutoApprovalPause?: import('../../../core/src/channels/channel.js').ChannelToolAutoApprovalPause;
+  memberDeparture?: {
+    memberKind: 'bot' | 'human';
+    memberId: string;
+    displayName: string;
+    departureType?: 'left' | 'removed';
+  };
+  grantRequest?: true;
+  grantRequestResolved?: boolean;
+  assignmentReply?: { sessionId: string; sourceEventId: string };
+  grantRequestResolution?: { requestMessageId: string; grantId: string };
+  toolApprovalRequest?: ToolApprovalRequestCard;
+  approval?: ApprovalCardView;
+  sessionFailure?: SessionFailureCard;
+  toolApprovalDecision?: ToolApprovalDecision;
+  userQuestionRequest?: UserQuestionRequestCard;
+  userQuestionResolution?: UserQuestionResolution;
+  privateInputRequest?: import('../../../core/src/credentials/contracts.js').PrivateInputCard;
+  privateInputResolution?: import('../../../core/src/credentials/contracts.js').PrivateInputResolution;
+  takeoverRequest?: import('../../../core/src/takeover/contracts.js').TakeoverRequestCard;
+  takeoverResolution?: import('../../../core/src/takeover/contracts.js').TakeoverResolution;
+  attachments?: ChannelAttachmentRef[];
+  voice?: import('../../../core/src/channels/channel.js').ChannelMessageVoice;
+  clearedAttachments?: import('../../../core/src/attachments/ref.js').ChannelClearedAttachment[];
+  format?: 'markdown' | 'text';
+  replyTo?: string;
+  replyToPreview?: ChannelReplyPreview | null;
+  pending?: boolean;
+  failed?: string;
+  unconfirmed?: boolean;
+  streaming?: boolean;
+  perf?: import('../../../core/src/channels/channel.js').ChannelMessagePerf;
+}
+
+export interface ChannelDraft {
+  channelId: string;
+  draftId: string;
+  attemptId: string;
+  revision: number;
+  botSlug: string;
+  body: string;
+}
+
+export interface OwnedSessionSummary {
+  sessionId: string;
+  role: 'orchestrator' | 'assignment';
+  createdAt: string;
+  cwdReference?: string;
+  assignmentActivity?: 'working' | 'idle' | 'error' | 'stopping' | 'stopped';
+  assignmentAccessMode?: 'workspace-write' | 'danger-full-access';
+  assignmentReportState?: 'progress' | 'completed' | 'blocked' | 'waiting-human' | 'failed';
+  assignmentExecutionWait?: 'waiting-human' | 'waiting-capacity';
+  assignmentArchived?: true;
+  assignmentTitle?: string;
+  assignmentDescription?: string;
+  assignmentModelRoute?: { provider: string; model: string; reasoningEffort?: string };
+  modelRoute?: { provider: string; model: string; reasoningEffort?: string };
+  currentOrchestrator?: boolean;
+  triageOpenCount?: number;
+  subagentCount?: number;
+}
+
+export type ActivityListCategory = 'action' | 'info' | 'unread' | 'replies' | 'handled';
+export type ActivityListSort = 'newest' | 'oldest';
+
+export interface ActivityListFilters {
+  botSlug: string | undefined;
+  channelId: string | undefined;
+  sort: ActivityListSort;
+  snoozed?: boolean;
+}
+
+export interface HumanAttentionItem {
+  id: string;
+  category: ActivityListCategory;
+  kind:
+    | 'group-join-request'
+    | 'pairing-request'
+    | 'user-question'
+    | 'private-input'
+    | 'takeover-request'
+    | 'tool-approval'
+    | 'auto-rejection'
+    | 'workspace-grant-request'
+    | 'bot-dm-message'
+    | 'assignment-waiting-human'
+    | 'assignment-blocked'
+    | 'assignment-report'
+    | 'bot-message-needs-repair'
+    | 'channel-unread'
+    | 'channel-reply'
+    | 'channel-mention';
+  createdAt: string;
+  channelId?: string;
+  channelName?: string;
+  botSlug: string;
+  summary: string;
+  requestId?: string;
+  messageId?: string;
+  assignmentSessionId?: string;
+  sourceEventId?: string;
+  unreadCount?: number;
+  isUnread?: boolean;
+  responseMessageId?: string;
+  responseSourceEventId?: string;
+  snoozedUntil?: string;
+  autoRejection?: {
+    sessionId: string;
+    toolName: string;
+    input: string;
+    template: string;
+    reason: string;
+  };
+}
+
+export interface HumanAttentionPage {
+  items: HumanAttentionItem[];
+  nextCursor?: string;
+}
+
+export interface ActivityListState {
+  messageCounts?: { replies: number; other: number } | undefined;
+  attentionStatus?: 'ready' | 'error' | undefined;
+  status: ClientStatus;
+  unreadCount: number;
+  channelUnread: Readonly<Record<string, number>>;
+  hasAction: boolean;
+  category: ActivityListCategory;
+  botSlug: string | undefined;
+  channelId: string | undefined;
+  sort: ActivityListSort;
+  snoozed: boolean;
+  items: readonly HumanAttentionItem[];
+  nextCursor: string | undefined;
+  error: string | undefined;
+}
+export type ConversationSelection =
+  | { kind: 'bot'; slug: string; profile?: true; inboxRequest?: number }
+  | { kind: 'channel'; channelId: string }
+  | { kind: 'inbox' };
+
+export interface ConversationTimeline {
+  olderCursor: string | null;
+  newerCursor: string | null;
+  hasOlder: boolean;
+  hasNewer: boolean;
+  loadingOlder: boolean;
+  olderError: string | undefined;
+  loadingNewer: boolean;
+  newerError: string | undefined;
+}
+
+export function initialTimeline(): ConversationTimeline {
+  return {
+    olderCursor: null,
+    newerCursor: null,
+    hasOlder: false,
+    hasNewer: false,
+    loadingOlder: false,
+    olderError: undefined,
+    loadingNewer: false,
+    newerError: undefined,
+  };
+}
+export interface ConversationState {
+  status: ClientStatus;
+  channel: ChannelSummary | undefined;
+  messages: readonly ChannelMessage[];
+  drafts: readonly ChannelDraft[];
+  draftRevision: number;
+  draftNotice: 'interrupted' | 'expired' | undefined;
+  revision: number;
+  timeline: ConversationTimeline;
+  focusMessageId?: string | undefined;
+  unreadAfterMessageId?: string | undefined;
+  error: string | undefined;
+  sending: boolean;
+}
+
+export type BotAttentionStatus =
+  | 'pending'
+  | 'processing'
+  | 'observed'
+  | 'deferred'
+  | 'needs-repair'
+  | 'open'
+  | 'snoozed'
+  | 'handled'
+  | 'ignored';
+
+export interface BotAttentionItem {
+  id: string;
+  botSlug: string;
+  reason: string;
+  state: BotAttentionStatus;
+  createdAt: string;
+  observedAt?: string;
+  handledAt?: string;
+  ignoredAt?: string;
+  resolutionNote?: string;
+  snoozedUntil?: string;
+  snoozeNote?: string;
+  sourceKind: string;
+  sourceChannelId?: string;
+  sourceChannelName?: string;
+  sourceMessageId?: string;
+  assignmentSessionId?: string;
+  assignmentTitle?: string;
+  assignmentReportState?: 'progress' | 'completed' | 'blocked' | 'waiting-human' | 'failed';
+  scheduleId?: string;
+  externalOrigin?: {
+    platform: string;
+    accountName: string;
+    conversationName: string;
+    conversationId: string;
+    senderId: string;
+    senderName?: string;
+    voice?: {
+      transcript: 'platform' | 'unavailable';
+      itemId?: string;
+      durationMs?: number;
+      encodeType?: number;
+      sampleRate?: number;
+      bitsPerSample?: number;
+    };
+  };
+  sourceAvailable: boolean;
+  authorKind: 'human' | 'bot' | 'bridged' | 'system';
+  authorBotSlug?: string;
+  summary: string;
+}
+
+export interface BotAttentionPage {
+  items: BotAttentionItem[];
+  nextCursor?: string;
+}
+
+export interface BotInboxState {
+  status: ClientStatus;
+  items: readonly BotAttentionItem[];
+  nextCursor: string | undefined;
+  error: string | undefined;
+}
+
+export interface SessionsState {
+  status: ClientStatus;
+  items: readonly OwnedSessionSummary[];
+  error: string | undefined;
+}
+
+export interface RosterState {
+  pins: readonly string[];
+  hidden: readonly string[];
+  muted: readonly string[];
+  sections: readonly RosterSection[];
+  topOrder: readonly TopOrderEntry[] | undefined;
+  readOnly: boolean;
+}
+
+export const CONVERSATION_STATE_KEYS = [
+  'bots',
+  'channels',
+  'selection',
+  'conversation',
+  'memoryCommitIntent',
+  'contentPurgeRevision',
+  'composerIdentity',
+] as const;
+export type ConversationStateView = Pick<ClientState, (typeof CONVERSATION_STATE_KEYS)[number]>;
+
+export interface ClientState {
+  contentPurgeRevision?: number;
+  composerIdentity?:
+    | import('../../../core/src/bridge/composer-recovery.js').ComposerRecoveryIdentity
+    | undefined;
+  mode: ClientMode;
+  bots: readonly BotSummary[];
+  channels: readonly ChannelSummary[];
+  status: ClientStatus;
+  error: string | undefined;
+  query: string;
+  memoryCommitIntent: { channelId: string; sha: string } | undefined;
+  config: RosterConfig;
+  roster: RosterState;
+  selection: ConversationSelection | undefined;
+  conversation: ConversationState;
+  sessions: SessionsState;
+  botInbox: BotInboxState;
+  activityList: ActivityListState;
+  activitySync: 'live' | 'stale';
+  git: GitAvailability | undefined;
+}
+
+export interface PersonaBotActivitySnapshot {
+  generation: string;
+  revision: number;
+  bots: {
+    slug: string;
+    state: PersonaBotActivityState;
+    activity?: PersonaBotToolActivity;
+    attention?: PersonaBotAttention;
+    sessions?: readonly PersonaBotSessionActivity[];
+  }[];
+}
+
+export interface ClientStore {
+  setDefaultTobName(name: string): void;
+  setComposerIdentity(identity: ClientState['composerIdentity']): void;
+  purgeContent(placements: readonly PurgedPlacement[]): void;
+  getSnapshot(): ClientState;
+  subscribe(listener: () => void): () => void;
+  setMode(mode: ClientMode): void;
+  setQuery(query: string): void;
+  setMemoryCommitIntent(intent: { channelId: string; sha: string } | undefined): void;
+  setConfig(config: RosterConfig): void;
+  setRosterStatus(status: ClientStatus, error: string | undefined): void;
+  setRoster(bots: readonly BotSummary[], channels: readonly ChannelSummary[]): void;
+  setRosterPreviews(bots: readonly BotSummary[], channels: readonly ChannelSummary[]): void;
+  applyActivity(snapshot: PersonaBotActivitySnapshot): void;
+  setActivitySync(sync: ClientState['activitySync']): void;
+  setGit(git: GitAvailability): void;
+  upsertBot(bot: BotSummary): void;
+  setRosterState(patch: Partial<RosterState>): void;
+  upsertChannel(channel: ChannelSummary): void;
+  select(
+    selection: ConversationSelection | undefined,
+    options?: { deferConversation?: boolean },
+  ): void;
+  setConversation(patch: Partial<ConversationState>): void;
+  updateCachedConversation(
+    channelId: string,
+    update: (cached: ConversationState) => ConversationState,
+  ): void;
+  setSessions(patch: Partial<SessionsState>): void;
+  setBotInbox(patch: Partial<BotInboxState>): void;
+  setActivityList(patch: Partial<ActivityListState>): void;
+}
+
+export function keepUnchanged<T>(
+  previous: readonly T[],
+  next: readonly T[],
+  key: (item: T) => string,
+): readonly T[] {
+  const before = new Map(previous.map((item) => [key(item), item]));
+  let same = previous.length === next.length;
+  const kept = next.map((item, index) => {
+    const old = before.get(key(item));
+    const reused = old !== undefined && JSON.stringify(old) === JSON.stringify(item) ? old : item;
+    if (reused !== previous[index]) same = false;
+    return reused;
+  });
+  return same ? previous : kept;
+}
+
+function initialConversation(): ConversationState {
+  return {
+    status: 'idle',
+    channel: undefined,
+    messages: [],
+    drafts: [],
+    draftRevision: 0,
+    draftNotice: undefined,
+    revision: 0,
+    timeline: initialTimeline(),
+    focusMessageId: undefined,
+    unreadAfterMessageId: undefined,
+    error: undefined,
+    sending: false,
+  };
+}
+
+function initialSessions(): SessionsState {
+  return { status: 'idle', items: [], error: undefined };
+}
+
+function initialBotInbox(): BotInboxState {
+  return { status: 'idle', items: [], nextCursor: undefined, error: undefined };
+}
+
+function initialActivityList(): ActivityListState {
+  return {
+    status: 'idle',
+    unreadCount: 0,
+    channelUnread: {},
+    hasAction: false,
+    category: 'action',
+    botSlug: undefined,
+    channelId: undefined,
+    sort: 'oldest',
+    snoozed: false,
+    items: [],
+    nextCursor: undefined,
+    error: undefined,
+  };
+}
+
+function initialRoster(): RosterState {
+  return {
+    pins: [],
+    hidden: [],
+    muted: [],
+    sections: [],
+    topOrder: undefined,
+    readOnly: false,
+  };
+}
+
+function sameSelection(
+  left: ConversationSelection | undefined,
+  right: ConversationSelection | undefined,
+): boolean {
+  if (left === right) return true;
+  if (left === undefined || right === undefined) return false;
+  if (left.kind === 'inbox' && right.kind === 'inbox') return true;
+  if (left.kind === 'bot' && right.kind === 'bot')
+    return (
+      left.slug === right.slug &&
+      left.profile === right.profile &&
+      left.inboxRequest === right.inboxRequest
+    );
+  if (left.kind === 'channel' && right.kind === 'channel')
+    return left.channelId === right.channelId;
+  return false;
+}
+
+function sameActivity(
+  left: PersonaBotActivitySnapshot['bots'][number] | undefined,
+  right: PersonaBotActivitySnapshot['bots'][number] | undefined,
+): boolean {
+  if (left === right) return true;
+  if (left === undefined || right === undefined) return false;
+  return (
+    left.state === right.state &&
+    JSON.stringify([left.activity, left.attention, left.sessions]) ===
+      JSON.stringify([right.activity, right.attention, right.sessions])
+  );
+}
+
+function sameValue(left: unknown, right: unknown): boolean {
+  if (left === right) return true;
+  if (Array.isArray(left) && Array.isArray(right)) return sameItems(left, right);
+  if (
+    typeof left !== 'object' ||
+    typeof right !== 'object' ||
+    left === null ||
+    right === null ||
+    Array.isArray(left) ||
+    Array.isArray(right)
+  )
+    return false;
+  const leftKeys = Object.keys(left);
+  return (
+    leftKeys.length === Object.keys(right).length &&
+    leftKeys.every(
+      (key) => (left as Record<string, unknown>)[key] === (right as Record<string, unknown>)[key],
+    )
+  );
+}
+
+function samePatch<T extends object>(current: T, patch: Partial<T>): boolean {
+  return (Object.keys(patch) as (keyof T)[]).every((key) => sameValue(current[key], patch[key]));
+}
+
+export function createStore({
+  smoothActivity = true,
+}: { smoothActivity?: boolean } = {}): ClientStore {
+  const conversations = new Map<string, ConversationState>();
+  const redactions = createContentRedactions();
+  const botChannels = new Map<string, string>();
+  const sessionsByBot = new Map<string, SessionsState>();
+  const inboxesByBot = new Map<string, BotInboxState>();
+  const rememberKeyed = <T>(cache: Map<string, T>, key: string, value: T): void => {
+    cache.delete(key);
+    cache.set(key, value);
+    if (cache.size > 30) cache.delete(cache.keys().next().value!);
+  };
+  const rememberConversation = (): void => {
+    const conversation = state.conversation;
+    const channelId = conversation.channel?.id;
+    if (channelId === undefined || conversation.status !== 'ready') return;
+    rememberKeyed(conversations, channelId, {
+      ...conversation,
+      unreadAfterMessageId: undefined,
+      drafts: [],
+      draftRevision: 0,
+      draftNotice: undefined,
+      error: undefined,
+      sending: false,
+      timeline: {
+        ...conversation.timeline,
+        loadingOlder: false,
+        olderError: undefined,
+        loadingNewer: false,
+        newerError: undefined,
+      },
+    });
+    if (state.selection?.kind === 'bot')
+      rememberKeyed(botChannels, state.selection.slug, channelId);
+  };
+  const botSlugForSelection = (selection: ConversationSelection | undefined): string | undefined =>
+    selection?.kind === 'bot'
+      ? selection.slug
+      : selection?.kind === 'channel'
+        ? state.channels.find((channel) => channel.id === selection.channelId)?.botSlug
+        : undefined;
+  const cachedChannelId = (selection: ConversationSelection | undefined): string | undefined =>
+    selection?.kind === 'channel'
+      ? selection.channelId
+      : selection?.kind === 'bot'
+        ? (state.channels.find(
+            (channel) => channel.type === 'dm' && channel.botSlug === selection.slug,
+          )?.id ?? botChannels.get(selection.slug))
+        : undefined;
+  let state: ClientState = {
+    mode: 'dsh',
+    bots: [],
+    channels: [],
+    status: 'idle',
+    error: undefined,
+    query: '',
+    memoryCommitIntent: undefined,
+    config: { collapsed: {} },
+    roster: initialRoster(),
+    selection: undefined,
+    conversation: initialConversation(),
+    sessions: initialSessions(),
+    botInbox: initialBotInbox(),
+    activityList: initialActivityList(),
+    activitySync: 'live',
+    git: undefined,
+  };
+  const listeners = new Set<() => void>();
+  let defaultTobName = 'Tob';
+  const presentBot = (bot: BotSummary): BotSummary =>
+    bot.tob?.defaultName ? { ...bot, displayName: defaultTobName } : bot;
+  let activity: PersonaBotActivitySnapshot | undefined;
+  let activityStates = new Map<string, PersonaBotActivitySnapshot['bots'][number]>();
+  let rawActivity = new Map<string, PersonaBotActivitySnapshot['bots'][number]>();
+  const smoother = new ActivitySmoother<PersonaBotActivitySnapshot['bots'][number]>();
+  let settle: ReturnType<typeof setTimeout> | undefined;
+  const refreshActivity = (shownBefore: typeof activityStates): void => {
+    const bots = state.bots.map((bot) =>
+      sameActivity(shownBefore.get(bot.slug), activityStates.get(bot.slug))
+        ? bot
+        : withActivity(bot),
+    );
+    if (bots.some((bot, index) => bot !== state.bots[index])) update({ bots });
+  };
+  const smooth = () => {
+    if (settle !== undefined) clearTimeout(settle);
+    settle = undefined;
+    if (!smoothActivity) {
+      activityStates = rawActivity;
+      return;
+    }
+    const now = Date.now();
+    const { shown, wake } = smoother.step(rawActivity, now);
+    activityStates = shown;
+    if (wake !== undefined)
+      settle = setTimeout(() => {
+        settle = undefined;
+        const shownBefore = activityStates;
+        smooth();
+        refreshActivity(shownBefore);
+      }, wake - now);
+  };
+  const withActivity = (bot: BotSummary): BotSummary => {
+    const current = activityStates.get(bot.slug);
+    const {
+      activity: _previous,
+      sessionActivity: _previousSessions,
+      attention: _previousAttention,
+      ...rest
+    } = presentBot(bot);
+    return current === undefined
+      ? rest
+      : {
+          ...rest,
+          aggregateState: current.state,
+          ...(current.attention === undefined ? {} : { attention: current.attention }),
+          ...(current.activity === undefined ? {} : { activity: current.activity }),
+          ...(current.sessions === undefined ? {} : { sessionActivity: current.sessions }),
+        };
+  };
+
+  const update = (patch: Partial<ClientState>): void => {
+    const previous = state;
+    const redactedChannels = patch.channels?.map(redactions.channel);
+    state = {
+      ...state,
+      ...patch,
+      ...(patch.channels === undefined || redactedChannels === undefined
+        ? {}
+        : {
+            channels: sameItems(redactedChannels, patch.channels)
+              ? patch.channels
+              : redactedChannels,
+          }),
+      ...(patch.conversation === undefined
+        ? {}
+        : { conversation: redactions.conversation(patch.conversation) }),
+      ...(patch.botInbox === undefined ? {} : { botInbox: redactions.botInbox(patch.botInbox) }),
+      ...(patch.activityList === undefined
+        ? {}
+        : { activityList: redactions.activityList(patch.activityList) }),
+    };
+    const presentChannel = (channel: ChannelSummary): ChannelSummary => {
+      const bot =
+        channel.type === 'dm' && channel.botSlug
+          ? state.bots.find((candidate) => candidate.slug === channel.botSlug && candidate.tob)
+          : undefined;
+      return bot && channel.name !== bot.displayName
+        ? { ...channel, name: bot.displayName }
+        : channel;
+    };
+    if (patch.bots !== undefined || patch.channels !== undefined) {
+      const channels = state.channels.map(presentChannel);
+      if (channels.some((channel, index) => channel !== state.channels[index]))
+        state.channels = channels;
+    }
+    if (
+      patch.bots !== undefined ||
+      patch.channels !== undefined ||
+      patch.conversation !== undefined
+    ) {
+      if (state.conversation.channel) {
+        const channel = presentChannel(state.conversation.channel);
+        if (channel !== state.conversation.channel)
+          state.conversation = { ...state.conversation, channel };
+      }
+    }
+    if (
+      (Object.keys(state) as (keyof ClientState)[]).every((key) => state[key] === previous[key])
+    ) {
+      state = previous;
+      return;
+    }
+    for (const listener of listeners) listener();
+  };
+
+  return {
+    setDefaultTobName(name) {
+      if (defaultTobName === name) return;
+      defaultTobName = name;
+      update({ bots: state.bots.map(presentBot) });
+    },
+    purgeContent(placements) {
+      if (placements.length === 0) return;
+      redactions.accept(placements);
+      for (const [id, conversation] of conversations)
+        conversations.set(id, redactions.conversation(conversation));
+      for (const [slug, inbox] of inboxesByBot) inboxesByBot.set(slug, redactions.botInbox(inbox));
+      update({
+        contentPurgeRevision: (state.contentPurgeRevision ?? 0) + 1,
+        channels: state.channels,
+        conversation: state.conversation,
+        botInbox: state.botInbox,
+        activityList: state.activityList,
+      });
+    },
+    getSnapshot: () => state,
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    setMode(mode) {
+      if (state.mode !== mode) update({ mode });
+    },
+    setComposerIdentity(composerIdentity) {
+      update({ composerIdentity });
+    },
+    setMemoryCommitIntent(memoryCommitIntent) {
+      update({ memoryCommitIntent });
+    },
+    setQuery(query) {
+      if (state.query !== query) update({ query });
+    },
+    setConfig(config) {
+      update({ config });
+    },
+    setRosterStatus(status, error) {
+      update({ status, error });
+    },
+    setRoster(bots, channels) {
+      update({
+        bots: keepUnchanged(state.bots, bots.map(withActivity), (bot) => bot.slug),
+        channels: keepUnchanged(state.channels, channels, (channel) => channel.id),
+        status: 'ready',
+        error: undefined,
+      });
+    },
+    setRosterPreviews(bots, channels) {
+      update({
+        bots: keepUnchanged(state.bots, bots.map(withActivity), (bot) => bot.slug),
+        channels: keepUnchanged(state.channels, channels, (channel) => channel.id),
+      });
+    },
+    applyActivity(snapshot) {
+      if (activity?.generation === snapshot.generation && snapshot.revision <= activity.revision)
+        return;
+      activity = snapshot;
+      rawActivity = new Map(snapshot.bots.map((bot) => [bot.slug, bot]));
+      const shownBefore = activityStates;
+      smooth();
+      refreshActivity(shownBefore);
+    },
+    setActivitySync(activitySync) {
+      if (state.activitySync !== activitySync) update({ activitySync });
+    },
+    setGit(git) {
+      update({ git });
+    },
+    upsertBot(incoming) {
+      const previous = state.bots.find((candidate) => candidate.slug === incoming.slug);
+      const bot = withActivity({
+        ...incoming,
+        ...(incoming.lastActivityAt === undefined && previous?.lastActivityAt !== undefined
+          ? { lastActivityAt: previous.lastActivityAt }
+          : {}),
+      });
+      const existing = state.bots.filter((candidate) => candidate.slug !== bot.slug);
+      update({ bots: [bot, ...existing], status: 'ready', error: undefined });
+    },
+    setRosterState(patch) {
+      update({ roster: { ...state.roster, ...patch } });
+    },
+    upsertChannel(channel) {
+      const index = state.channels.findIndex((candidate) => candidate.id === channel.id);
+      update({
+        channels:
+          index === -1
+            ? [channel, ...state.channels]
+            : state.channels.map((candidate, at) =>
+                at === index ? { ...candidate, ...channel } : candidate,
+              ),
+      });
+    },
+    select(selection, options) {
+      if (sameSelection(state.selection, selection)) return;
+      rememberConversation();
+      const previousBot = botSlugForSelection(state.selection);
+      if (previousBot !== undefined) {
+        if (state.sessions.status === 'ready')
+          rememberKeyed(sessionsByBot, previousBot, state.sessions);
+        if (state.botInbox.status === 'ready')
+          rememberKeyed(inboxesByBot, previousBot, state.botInbox);
+      }
+      const channelId = cachedChannelId(selection);
+      const botSlug = botSlugForSelection(selection);
+      const cached = channelId === undefined ? undefined : conversations.get(channelId);
+      const channel = state.channels.find((candidate) => candidate.id === channelId);
+      update({
+        selection,
+        conversation:
+          cached === undefined || options?.deferConversation === true
+            ? selection?.kind === 'channel' || selection?.kind === 'bot'
+              ? { ...initialConversation(), status: 'loading', channel }
+              : initialConversation()
+            : { ...cached, channel: channel ?? cached.channel },
+        sessions:
+          (botSlug === undefined ? undefined : sessionsByBot.get(botSlug)) ?? initialSessions(),
+        botInbox:
+          (botSlug === undefined ? undefined : inboxesByBot.get(botSlug)) ?? initialBotInbox(),
+        activityList: {
+          ...initialActivityList(),
+          unreadCount: state.activityList.unreadCount,
+          hasAction: state.activityList.hasAction,
+          messageCounts: state.activityList.messageCounts,
+          attentionStatus: state.activityList.attentionStatus,
+        },
+      });
+    },
+    setConversation(patch) {
+      update({ conversation: { ...state.conversation, ...patch } });
+    },
+    updateCachedConversation(channelId, apply) {
+      const cached = conversations.get(channelId);
+      if (cached !== undefined)
+        conversations.set(channelId, redactions.conversation(apply(cached)));
+    },
+    setSessions(patch) {
+      update({ sessions: { ...state.sessions, ...patch } });
+    },
+    setBotInbox(patch) {
+      if (samePatch(state.botInbox, patch)) return;
+      update({ botInbox: { ...state.botInbox, ...patch } });
+    },
+    setActivityList(patch) {
+      if (samePatch(state.activityList, patch)) return;
+      update({ activityList: { ...state.activityList, ...patch } });
+    },
+  };
+}
+
+export const store = createStore();

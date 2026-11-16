@@ -1,0 +1,466 @@
+import { createHash } from 'node:crypto';
+
+import { describe, expect, it, vi } from 'vitest';
+
+import { createConnectAccount } from '../src/host/connect-account';
+import { redeemPairing } from '../src/host/pairing';
+
+const RELAY = 'https://relay.test';
+const REDIRECT = 'ai.botharness.deepseekbot.dev:/oauth2redirect';
+const challenge = async (value: string) => createHash('sha256').update(value).digest('base64url');
+
+function fakeRelay(
+  options: {
+    offline?: boolean;
+    expired?: boolean;
+    expiredText?: boolean;
+    deletion?: number;
+    hostname?: string;
+    direct?: boolean;
+    hostStatus?: number;
+    redirected?: boolean;
+    hang?: boolean;
+    bodyHang?: boolean;
+    badIdentity?: boolean;
+    malformed?: boolean;
+    revoke?: { status: number; body: unknown };
+  } = {},
+) {
+  let stored: string | null = null;
+  let randoms = 0;
+  const calls: { url: string; method?: string; auth?: string; body?: string }[] = [];
+  const request = vi.fn(async (url: string, init?: RequestInit) => {
+    const body = typeof init?.body === 'string' ? init.body : undefined;
+    const auth = new Headers(init?.headers).get('authorization') ?? undefined;
+    calls.push({
+      url,
+      ...(init?.method ? { method: init.method } : {}),
+      ...(auth ? { auth } : {}),
+      ...(body ? { body } : {}),
+    });
+    if (url === `${RELAY}/v1/config`) return Response.json({ clientId: 'client_01TEST' });
+    if (url === 'https://api.workos.com/user_management/authenticate') {
+      const form = new URLSearchParams(body);
+      if (form.get('grant_type') === 'authorization_code')
+        return Response.json({
+          access_token: 'access-0',
+          refresh_token: 'refresh-0',
+          user: { id: 'user_alice', email: 'alice@example.com' },
+        });
+      if (options.expired)
+        return options.expiredText
+          ? new Response('Unauthorized private=fixture-secret', { status: 400 })
+          : Response.json({ error: 'invalid_grant' }, { status: 400 });
+      return Response.json({ access_token: 'access-1', refresh_token: 'refresh-1' });
+    }
+    if (url === `${RELAY}/v1/hosts`)
+      return Response.json({
+        hosts: [
+          { id: 'hstudio', name: 'Studio', hostname: 'hstudio.deepseekbot.dev', tunnel: true },
+          { id: 'hlaptop', name: 'Laptop', hostname: 'hlaptop.deepseekbot.dev', tunnel: false },
+          {
+            id: 'hqueued',
+            name: 'Queued',
+            hostname: 'hqueued.deepseekbot.dev',
+            tunnel: false,
+            state: 'waiting',
+          },
+          { id: 7 },
+        ],
+      });
+    if (url === `${RELAY}/v1/hosts/hstudio/offer`) {
+      if (options.offline)
+        return Response.json({ error: { code: 'host-offline' } }, { status: 409 });
+      if (options.direct)
+        return Response.json({
+          identitySource: 'client',
+          enrollment: { body: 'signed-request', signature: 'signature' },
+          expiresAt: '2026-10-21T12:10:00.000Z',
+          hostname: options.hostname ?? 'hstudio.deepseekbot.dev',
+        });
+      return Response.json({
+        encryption: { protocol: 'connect-noise-xk-v1', publicKey: 'ab'.repeat(32) },
+        enrollment: { body: 'signed-request', signature: 'signature' },
+        expiresAt: '2026-10-21T12:10:00.000Z',
+        hostname: options.hostname ?? 'hstudio.deepseekbot.dev',
+        host: { id: 'pairing-host', name: 'Studio Mac' },
+      });
+    }
+    if (url === 'https://hstudio.deepseekbot.dev/botharness-device/channel') {
+      expect(auth).toBeUndefined();
+      expect(init?.redirect).toBe('error');
+      if (options.hang)
+        return new Promise<Response>((_, reject) => {
+          init?.signal?.addEventListener(
+            'abort',
+            () => reject(new DOMException('Aborted', 'AbortError')),
+            { once: true },
+          );
+        });
+      if (options.bodyHang)
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              init?.signal?.addEventListener(
+                'abort',
+                () => controller.error(new DOMException('Aborted', 'AbortError')),
+                { once: true },
+              );
+            },
+          }),
+        );
+      if (options.malformed) return new Response('{invalid');
+      const response = Response.json(
+        {
+          encryption: { protocol: 'connect-noise-xk-v1', publicKey: 'ab'.repeat(32) },
+          host: { id: 'pairing-host', name: 'Studio Mac' },
+        },
+        { status: options.hostStatus ?? 200 },
+      );
+      if (options.redirected)
+        Object.defineProperty(response, 'url', {
+          value: 'https://attacker.invalid/botharness-device/channel',
+        });
+      return options.badIdentity ? Response.json({ host: { id: 'bad', name: 'Bad' } }) : response;
+    }
+    if (url === `${RELAY}/v1/account` && init?.method === 'DELETE')
+      return options.deletion === undefined
+        ? Response.json({ deleted: true })
+        : Response.json({ error: { code: 'upstream-unavailable' } }, { status: options.deletion });
+    if (url === `${RELAY}/v1/hosts/hlaptop/revoke` && init?.method === 'POST')
+      return Response.json(
+        options.revoke?.body ?? { deleted: true, sessionKnown: true, sessionRevoked: true },
+        { status: options.revoke?.status ?? 200 },
+      );
+    return Response.json({}, { status: 404 });
+  });
+  const authorize = vi.fn(async (url: string) => {
+    const state = new URL(url).searchParams.get('state');
+    return `${REDIRECT}?code=auth-code&state=${state}`;
+  });
+  const listedHosts = vi.fn(async (_hosts: readonly unknown[]) => undefined);
+  const account = createConnectAccount({
+    relay: RELAY,
+    redirectUri: REDIRECT,
+    listedHosts,
+    runtime: {
+      read: async () => stored,
+      write: async (value) => {
+        stored = value;
+      },
+      request,
+      random: () => `random-${(randoms += 1)}`,
+      challenge,
+      authorize,
+      now: () => Date.parse('2026-10-21T12:00:00Z'),
+    },
+  });
+  return { account, calls, authorize, listedHosts, stored: () => stored };
+}
+
+describe('phone Connect account', () => {
+  it('revokes an offline computer from the signed-in phone without pairing or signing the phone out', async () => {
+    const relay = fakeRelay();
+    await relay.account.signIn();
+    const key = await relay.account.actionKey();
+    expect(await relay.account.revokeHost(key!, 'hlaptop')).toEqual({
+      ok: true,
+      value: { sessionKnown: true, sessionRevoked: true },
+    });
+    expect(relay.calls.at(-1)).toMatchObject({
+      url: `${RELAY}/v1/hosts/hlaptop/revoke`,
+      method: 'POST',
+      auth: 'Bearer access-1',
+    });
+    expect(await relay.account.email()).toBe('alice@example.com');
+    expect(await relay.account.actionKey()).toBe(key);
+    expect(relay.calls.some((call) => call.url.endsWith('/offer'))).toBe(false);
+  });
+
+  it('refuses a confirmation from a previous phone login before contacting the relay', async () => {
+    const relay = fakeRelay();
+    await relay.account.signIn();
+    const key = await relay.account.actionKey();
+    await relay.account.signIn();
+    expect(await relay.account.revokeHost(key!, 'hlaptop')).toEqual({
+      ok: false,
+      code: 'account-changed',
+    });
+    expect(relay.calls.some((call) => call.url.endsWith('/revoke'))).toBe(false);
+  });
+
+  it.each([
+    [404, { error: { code: 'host-not-found' } }, 'host-not-found'],
+    [409, { error: { code: 'current-host' } }, 'current-host'],
+    [409, { error: { code: 'session-unknown' } }, 'session-unknown'],
+    [502, { error: { code: 'upstream-unavailable' } }, 'relay-unavailable'],
+    [200, { deleted: true }, 'relay-unavailable'],
+  ])('does not turn an incomplete revoke receipt (%s) into success', async (status, body, code) => {
+    const relay = fakeRelay({ revoke: { status, body } });
+    await relay.account.signIn();
+    expect(
+      await relay.account.revokeHost((await relay.account.actionKey())!, 'hlaptop'),
+    ).toMatchObject({ ok: false, code });
+  });
+
+  it('signs in with PKCE against the relay client and lists the linked Hosts', async () => {
+    const relay = fakeRelay();
+    expect(await relay.account.email()).toBeNull();
+    expect(await relay.account.signIn()).toEqual({ ok: true, value: 'alice@example.com' });
+    const authorizeUrl = new URL(relay.authorize.mock.calls[0]![0]);
+    expect(Object.fromEntries(authorizeUrl.searchParams)).toMatchObject({
+      client_id: 'client_01TEST',
+      redirect_uri: REDIRECT,
+      code_challenge: await challenge('random-1'),
+      code_challenge_method: 'S256',
+      state: 'random-2',
+      max_age: '0',
+    });
+    expect(JSON.parse(relay.stored()!)).toEqual({
+      clientId: 'client_01TEST',
+      refreshToken: 'refresh-0',
+      email: 'alice@example.com',
+      subject: 'user_alice',
+      sessionId: 'random-3',
+    });
+    expect(await relay.account.hosts()).toEqual({
+      ok: true,
+      value: [
+        { id: 'hstudio', name: 'Studio', hostname: 'hstudio.deepseekbot.dev', online: true },
+        { id: 'hlaptop', name: 'Laptop', hostname: 'hlaptop.deepseekbot.dev', online: false },
+        {
+          id: 'hqueued',
+          name: 'Queued',
+          hostname: 'hqueued.deepseekbot.dev',
+          online: false,
+          waiting: true,
+        },
+      ],
+    });
+    expect(relay.listedHosts).toHaveBeenCalledTimes(1);
+    expect(relay.listedHosts.mock.calls[0]![0]).toHaveLength(3);
+    expect(relay.calls.at(-1)).toMatchObject({ auth: 'Bearer access-1' });
+    expect(JSON.parse(relay.stored()!).refreshToken).toBe('refresh-1');
+  });
+
+  it('obtains identity directly on the phone network, without sending the account token or verifier', async () => {
+    const relay = fakeRelay({ direct: true });
+    await relay.account.signIn();
+    expect(await relay.account.offer('hstudio', 'iPhone')).toMatchObject({
+      ok: true,
+      value: { host: { id: 'pairing-host' }, enrollment: { body: 'signed-request' } },
+    });
+    expect(relay.calls.at(-1)).toEqual({
+      url: 'https://hstudio.deepseekbot.dev/botharness-device/channel',
+      method: 'GET',
+    });
+  });
+
+  it.each([408, 429, 500, 502, 503, 530])(
+    'reports a temporary phone-to-Host HTTP %i failure as unreachable',
+    async (status) => {
+      const relay = fakeRelay({ direct: true, hostStatus: status });
+      await relay.account.signIn();
+      expect(await relay.account.offer('hstudio', 'iPhone')).toMatchObject({
+        ok: false,
+        code: 'unreachable',
+        detail: `connect:http-${status}`,
+        diagnostic: { phase: 'pairing-offer', status },
+      });
+    },
+  );
+
+  it.each([{ redirected: true }, { badIdentity: true }, { malformed: true }])(
+    'refuses a redirected or malformed Host identity: %j',
+    async (options) => {
+      const relay = fakeRelay({ direct: true, ...options });
+      await relay.account.signIn();
+      expect(await relay.account.offer('hstudio', 'iPhone')).toMatchObject({
+        ok: false,
+        code: 'host-refused',
+      });
+    },
+  );
+
+  it.each([{ hang: true }, { bodyHang: true }])(
+    'ends a stalled direct Host identity request within eight seconds: %j',
+    async (options) => {
+      vi.useFakeTimers();
+      try {
+        const relay = fakeRelay({ direct: true, ...options });
+        await relay.account.signIn();
+        const result = relay.account.offer('hstudio', 'iPhone');
+        await vi.advanceTimersByTimeAsync(8_000);
+        expect(await result).toMatchObject({
+          ok: false,
+          code: 'unreachable',
+          diagnostic: { phase: 'pairing-offer' },
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it('keeps the verifier off the relay and requires fingerprint confirmation before encrypted enrollment', async () => {
+    const relay = fakeRelay();
+    await relay.account.signIn();
+    const offer = await relay.account.offer('hstudio', 'iPhone');
+    expect(offer).toMatchObject({
+      ok: true,
+      value: {
+        offer: '',
+        encryption: { protocol: 'connect-noise-xk-v1', publicKey: 'ab'.repeat(32) },
+        enrollment: { body: 'signed-request', signature: 'signature' },
+        verifier: 'random-4',
+      },
+    });
+    expect(JSON.parse(relay.calls.at(-1)!.body!)).toEqual({
+      verifierHash: await challenge('random-4'),
+      name: 'iPhone',
+      identitySource: 'client',
+    });
+    if (!offer.ok) throw new Error('missing enrollment');
+    const request = vi.fn(),
+      openSocket = vi.fn();
+    expect(
+      await redeemPairing({
+        payload: offer.value,
+        deviceName: 'iPhone',
+        carrier: { request, openSocket },
+      }),
+    ).toEqual({ ok: false, code: 'host-key-confirmation-required' });
+    expect(request).not.toHaveBeenCalled();
+    expect(openSocket).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'attacker.example',
+    'hstudio.deepseekbot.dev.attacker.example',
+    'hstudio.deepseekbot.dev@attacker.example',
+    'user@hstudio.deepseekbot.dev',
+    'hstudio.deepseekbot.dev:8443',
+    'hstudio.deepseekbot.dev:443',
+    'hstudio.deepseekbot.dev/path',
+    'hstudio.deepseekbot.dev?redirect=attacker',
+    'hstudio.deepseekbot.dev#fragment',
+    'hstudio.deepseekbot.dev.',
+    'studio.tailnet.ts.net',
+    '127.0.0.1',
+  ])('rejects the relay enrollment hostname %s before pairing', async (hostname) => {
+    const relay = fakeRelay({ hostname });
+    await relay.account.signIn();
+    expect(await relay.account.offer('hstudio', 'iPhone')).toEqual({
+      ok: false,
+      code: 'relay-unavailable',
+      detail: 'relay:invalid-response',
+      diagnostic: {
+        code: 'relay-unavailable',
+        detail: 'relay:invalid-response',
+        phase: 'pairing-offer',
+        status: 200,
+        occurredAt: expect.any(String),
+      },
+    });
+  });
+
+  it('reports offline Hosts, cancelled sign-ins and expired sessions', async () => {
+    const offline = fakeRelay({ offline: true });
+    await offline.account.signIn();
+    expect(await offline.account.offer('hstudio', 'iPhone')).toEqual({
+      ok: false,
+      code: 'host-offline',
+      detail: 'relay:host-offline',
+      diagnostic: {
+        code: 'host-offline',
+        detail: 'relay:host-offline',
+        phase: 'pairing-offer',
+        status: 409,
+        occurredAt: expect.any(String),
+      },
+    });
+
+    const cancelled = fakeRelay();
+    cancelled.authorize.mockResolvedValueOnce(null as never);
+    expect(await cancelled.account.signIn()).toEqual({ ok: false, code: 'sign-in-cancelled' });
+    expect(await cancelled.account.hosts()).toEqual({ ok: false, code: 'sign-in-required' });
+
+    const expired = fakeRelay({ expired: true });
+    await expired.account.signIn();
+    expect(await expired.account.hosts()).toEqual({
+      ok: false,
+      code: 'sign-in-required',
+      diagnostic: {
+        code: 'sign-in-required',
+        phase: 'sign-in-session',
+        status: 400,
+        occurredAt: expect.any(String),
+      },
+    });
+    expect(expired.stored()).toBeNull();
+
+    const forged = fakeRelay();
+    forged.authorize.mockResolvedValueOnce(`${REDIRECT}?code=x&state=other` as never);
+    expect(await forged.account.signIn()).toEqual({ ok: false, code: 'sign-in-failed' });
+    await forged.account.signIn();
+    await forged.account.signOut((await forged.account.actionKey())!);
+    expect(await forged.account.email()).toBeNull();
+  });
+
+  it('deletes the account at the relay and forgets the session only when it succeeds', async () => {
+    const failing = fakeRelay({ deletion: 502 });
+    await failing.account.signIn();
+    expect(await failing.account.deleteAccount((await failing.account.actionKey())!)).toEqual({
+      ok: false,
+      code: 'account-deletion-uncertain',
+    });
+    expect(await failing.account.email()).toBe('alice@example.com');
+
+    const relay = fakeRelay();
+    await relay.account.signIn();
+    expect(await relay.account.deleteAccount((await relay.account.actionKey())!)).toEqual({
+      ok: true,
+      value: undefined,
+    });
+    expect(relay.calls.at(-1)).toEqual({
+      url: `${RELAY}/v1/account`,
+      method: 'DELETE',
+      auth: 'Bearer access-1',
+    });
+    expect(await relay.account.email()).toBeNull();
+    expect(relay.stored()).toBeNull();
+  });
+});
+
+it('keeps expired-session semantics and safe HTTP context when the auth response is not JSON', async () => {
+  const relay = fakeRelay({ expired: true, expiredText: true });
+  await relay.account.signIn();
+  const failure = await relay.account.hosts();
+  expect(failure).toMatchObject({
+    ok: false,
+    code: 'sign-in-required',
+    diagnostic: { phase: 'sign-in-session', status: 400 },
+  });
+  expect(JSON.stringify(failure)).not.toContain('fixture-secret');
+  expect(await relay.account.email()).toBeNull();
+});
+
+it.each(['fixture-secret', 'host-refused'])(
+  'never returns arbitrary relay code/cause text as a retained diagnostic (%s)',
+  async (code) => {
+    const relay = fakeRelay({
+      revoke: {
+        status: 502,
+        body: { error: { code, cause: 'credential-sentinel', message: 'Bearer fixture-secret' } },
+      },
+    });
+    await relay.account.signIn();
+    const key = await relay.account.actionKey();
+    const failure = await relay.account.revokeHost(key!, 'hlaptop');
+    expect(failure).toMatchObject({
+      ok: false,
+      diagnostic: { phase: 'account-action', status: 502 },
+    });
+    expect(JSON.stringify(failure)).not.toMatch(/fixture-secret|credential-sentinel|Bearer/u);
+  },
+);

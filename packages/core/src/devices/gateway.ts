@@ -1,0 +1,788 @@
+import { TEAM_PATH, type TeamHttp } from '../team/http.js';
+import { createHash, randomBytes } from 'node:crypto';
+import { request as httpRequest, type IncomingMessage, type ServerResponse } from 'node:http';
+import type { Duplex } from 'node:stream';
+
+import type { Admission, DevicePairing, DeviceRefusal, OfferRefusal } from './pairing.js';
+import { phoneRoute } from './routes.js';
+import {
+  LOCAL_VIDEO_LIMITS,
+  LOCAL_VIDEO_PATH,
+  type LocalVideoResult,
+} from '../../../computer/src/local-video-contract.js';
+import { DEVICE_ROUTE_HEADER, forwardDeviceRoute, isConnectRequest } from './route-context.js';
+import {
+  VOICE_CALL_CONNECT_REFUSAL,
+  VOICE_CALL_LIMITS,
+  VOICE_CALL_PATH,
+  type VoiceCallResult,
+} from '../voice/call-contract.js';
+import { refuseConnectRpc } from './rpc-policy.js';
+import { connectMux } from './connect-mux.js';
+
+export const DEVICE_GATEWAY_PREFIX = '/botharness-device';
+export const DEVICE_PAIR_PATH = `${DEVICE_GATEWAY_PREFIX}/pair`;
+export const DEVICE_FEED_READ_PATH = `${DEVICE_GATEWAY_PREFIX}/feed-read`;
+export const DEVICE_UNPAIR_PATH = `${DEVICE_GATEWAY_PREFIX}/unpair`;
+export const DEVICE_REMOVE_PATH = `${DEVICE_GATEWAY_PREFIX}/devices/remove`;
+export const DEVICE_CONNECT_OFFER_PATH = `${DEVICE_GATEWAY_PREFIX}/connect/offer`;
+export const DEVICE_STREAM_TICKET_PATH = `${DEVICE_GATEWAY_PREFIX}/stream-ticket`;
+export const RELAY_SIGNATURE_HEADER = 'x-botharness-relay-signature';
+export const DEVICE_MUX_PATH = `${DEVICE_GATEWAY_PREFIX}/api/remote.mux`;
+export const DEVICE_ACTIVITY_PREFIX = `${DEVICE_GATEWAY_PREFIX}/activity`;
+export const DEVICE_PUSH_PREFIX = `${DEVICE_GATEWAY_PREFIX}/push`;
+export const DEVICE_SIGNALING_PATHS = [
+  `${DEVICE_GATEWAY_PREFIX}/api/computer/webrtc/signaling`,
+  `${DEVICE_GATEWAY_PREFIX}/api/browser/webrtc/signaling`,
+] as const;
+const STREAM_TICKET_TTL_MS = 30_000;
+const MAX_STREAM_TICKETS = 256;
+const CORS_PATHS = new Set([DEVICE_PAIR_PATH, DEVICE_UNPAIR_PATH, DEVICE_STREAM_TICKET_PATH]);
+
+const PAIR_BODY_LIMIT = 4096;
+const COOKIE_LIFETIME_MS = 6 * 60 * 60 * 1000;
+const HOP_BY_HOP = new Set([
+  'connection',
+  'keep-alive',
+  'proxy-authenticate',
+  'proxy-authorization',
+  'te',
+  'trailer',
+  'transfer-encoding',
+  'upgrade',
+]);
+const NEVER_FORWARDED = new Set([
+  'host',
+  'cookie',
+  'authorization',
+  'origin',
+  'referer',
+  'sec-fetch-site',
+  'sec-fetch-mode',
+  'sec-fetch-dest',
+  'sec-fetch-user',
+  DEVICE_ROUTE_HEADER,
+]);
+const WEBSOCKET_HEADERS = [
+  'upgrade',
+  'connection',
+  'sec-websocket-key',
+  'sec-websocket-version',
+  'sec-websocket-extensions',
+  'sec-websocket-protocol',
+];
+
+export type GatewayRefusal =
+  | DeviceRefusal
+  | OfferRefusal
+  | 'origin-refused'
+  | 'ticket-invalid'
+  | 'relay-signature-invalid'
+  | 'host-session-unavailable'
+  | 'relationship-local-client-required'
+  | 'not-found';
+
+export interface DeviceGatewayOptions {
+  team?: TeamHttp;
+  pairing: DevicePairing;
+  port: () => number;
+  authenticatedUrl: (baseUrl: string) => string;
+  now?: () => number;
+  log?: (message: string) => void;
+  localVideo?: (request: {
+    deviceId: string;
+    command: unknown;
+    signal: AbortSignal;
+  }) => Promise<LocalVideoResult>;
+  voiceCall?: (request: {
+    deviceId: string;
+    command: unknown;
+    signal: AbortSignal;
+  }) => Promise<VoiceCallResult>;
+  activity?: (request: {
+    method: string;
+    path: string;
+    deviceId: string;
+    body: Record<string, unknown>;
+  }) => Promise<{ status: number; body: unknown }>;
+  push?: (request: {
+    method: string;
+    path: string;
+    deviceId: string;
+    body: Record<string, unknown>;
+  }) => Promise<{ status: number; body: unknown }>;
+  connectOffer?: (
+    body: string,
+    signature: string | undefined,
+  ) => Promise<{ ok: true; verifierHash: string; name?: string } | { ok: false }>;
+}
+
+export interface DeviceGateway {
+  handle(request: IncomingMessage, response: ServerResponse): Promise<void>;
+  upgrade(request: IncomingMessage, socket: Duplex, head: Buffer): Promise<void>;
+}
+
+function header(request: IncomingMessage, name: string): string | undefined {
+  const value = request.headers[name];
+  return Array.isArray(value) ? value[0] : value;
+}
+
+function crossOrigin(request: IncomingMessage): boolean {
+  const origin = header(request, 'origin');
+  if (origin === undefined) return false;
+  try {
+    return new URL(origin).host !== header(request, 'host');
+  } catch {
+    return true;
+  }
+}
+
+function hostOrigin(request: IncomingMessage): string | undefined {
+  const origin = header(request, 'origin');
+  return origin === undefined || phoneRoute(origin) === undefined ? undefined : origin;
+}
+
+function corsPath(path: string): boolean {
+  return CORS_PATHS.has(path) || path.startsWith(`${DEVICE_GATEWAY_PREFIX}/api/`);
+}
+
+function preflight(request: IncomingMessage, response: ServerResponse): void {
+  response.writeHead(204, {
+    'access-control-allow-methods': 'GET, POST',
+    'access-control-allow-headers': 'authorization, content-type',
+    'access-control-max-age': '600',
+    ...(header(request, 'access-control-request-private-network') === 'true'
+      ? { 'access-control-allow-private-network': 'true' }
+      : {}),
+  });
+  response.end();
+}
+
+function refuse(response: ServerResponse, status: number, code: GatewayRefusal): void {
+  response.writeHead(status, {
+    'content-type': 'application/json',
+    'cache-control': 'no-store',
+  });
+  response.end(JSON.stringify({ code }));
+}
+
+function refuseUpgrade(socket: Duplex, status: number, code: GatewayRefusal): void {
+  const body = JSON.stringify({ code });
+  const reason = status === 401 ? 'Unauthorized' : status === 403 ? 'Forbidden' : 'Error';
+  socket.end(
+    `HTTP/1.1 ${status} ${reason}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`,
+  );
+}
+
+async function readSmall(request: IncomingMessage, limit: number): Promise<string | undefined> {
+  let size = 0;
+  const chunks: Buffer[] = [];
+  for await (const chunk of request) {
+    size += (chunk as Buffer).length;
+    if (size > limit) return undefined;
+    chunks.push(chunk as Buffer);
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
+
+export function createDeviceGateway(options: DeviceGatewayOptions): DeviceGateway {
+  const { pairing } = options;
+  const now = options.now ?? Date.now;
+  const log = options.log ?? (() => {});
+  const loopback = (): string => `127.0.0.1:${String(options.port())}`;
+  let cookie: { value: string; mintedAt: number } | undefined;
+  let minting: Promise<string> | undefined;
+
+  const mint = (): Promise<string> => {
+    minting ??= (async () => {
+      try {
+        const url = options.authenticatedUrl(`http://${loopback()}/`);
+        const response = await fetch(url, { redirect: 'manual' });
+        const issued = response.headers.getSetCookie();
+        await response.body?.cancel();
+        if (issued.length === 0) throw new Error(`loopback login answered ${response.status}`);
+        const value = issued.map((entry) => entry.split(';')[0]).join('; ');
+        cookie = { value, mintedAt: now() };
+        log('device-gateway phase=host-session-minted');
+        return value;
+      } finally {
+        minting = undefined;
+      }
+    })();
+    return minting;
+  };
+
+  const hostSession = async (): Promise<string> =>
+    cookie !== undefined && now() - cookie.mintedAt < COOKIE_LIFETIME_MS
+      ? cookie.value
+      : await mint();
+
+  const streamTickets = new Map<string, { deviceId: string; expiresAt: number }>();
+  const sessionKey = (value: string): string => createHash('sha256').update(value).digest('hex');
+
+  const streamTicket = (request: IncomingMessage, response: ServerResponse): void => {
+    if (request.method !== 'POST') return refuse(response, 404, 'not-found');
+    const admission = pairing.admit(header(request, 'authorization'));
+    if (!admission.ok) return refuse(response, 401, admission.code);
+    for (const [key, ticket] of streamTickets)
+      if (ticket.expiresAt <= now()) streamTickets.delete(key);
+    while (streamTickets.size >= MAX_STREAM_TICKETS)
+      streamTickets.delete(streamTickets.keys().next().value!);
+    const ticket = randomBytes(32).toString('base64url');
+    const expiresAt = now() + STREAM_TICKET_TTL_MS;
+    streamTickets.set(sessionKey(ticket), { deviceId: admission.device.id, expiresAt });
+    log('device-gateway phase=stream-ticket-issued');
+    response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+    response.end(JSON.stringify({ ticket, expiresAt: new Date(expiresAt).toISOString() }));
+  };
+
+  const ticketAdmission = (
+    request: IncomingMessage,
+  ): Admission | { ok: false; code: 'ticket-invalid' } | undefined => {
+    const value = new URL(request.url ?? '/', 'http://device').searchParams.get('ticket');
+    if (value === null) return undefined;
+    const key = sessionKey(value);
+    const ticket = streamTickets.get(key);
+    streamTickets.delete(key);
+    if (ticket === undefined || ticket.expiresAt <= now())
+      return { ok: false, code: 'ticket-invalid' };
+    return pairing.check(ticket.deviceId);
+  };
+
+  const forwardHeaders = (request: IncomingMessage, session: string): Record<string, string> => {
+    const headers: Record<string, string> = {};
+    for (const [name, value] of Object.entries(request.headers)) {
+      if (value === undefined || HOP_BY_HOP.has(name) || NEVER_FORWARDED.has(name)) continue;
+      headers[name] = Array.isArray(value) ? value.join(', ') : value;
+    }
+    headers.host = loopback();
+    headers.cookie = session;
+    return { ...headers, ...forwardDeviceRoute(request) };
+  };
+
+  const pair = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
+    if (request.method !== 'POST') return refuse(response, 404, 'not-found');
+    const text = await readSmall(request, PAIR_BODY_LIMIT);
+    let input: { offer?: unknown; name?: unknown; verifier?: unknown } = {};
+    try {
+      input = JSON.parse(text ?? '') as typeof input;
+    } catch {}
+    if (typeof input.offer !== 'string') return refuse(response, 401, 'offer-invalid');
+    const result = pairing.redeem({
+      offer: input.offer,
+      ...(typeof input.name === 'string' ? { name: input.name } : {}),
+      ...(typeof input.verifier === 'string' ? { verifier: input.verifier } : {}),
+    });
+    if (!result.ok) return refuse(response, 401, result.code);
+    response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+    response.end(
+      JSON.stringify({
+        deviceId: result.device.id,
+        credential: result.credential,
+        host: result.host,
+      }),
+    );
+  };
+
+  const unpair = (request: IncomingMessage, response: ServerResponse): void => {
+    if (request.method !== 'POST') return refuse(response, 404, 'not-found');
+    const admission = pairing.admit(header(request, 'authorization'));
+    if (!admission.ok) return refuse(response, 401, admission.code);
+    pairing.revoke(admission.device.id);
+    response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+    response.end(JSON.stringify({ revoked: true }));
+  };
+
+  const remove = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
+    if (request.method !== 'POST') return refuse(response, 404, 'not-found');
+    const admission = pairing.admit(header(request, 'authorization'));
+    if (!admission.ok) return refuse(response, 401, admission.code);
+    let input: { deviceId?: unknown } = {};
+    try {
+      input = JSON.parse((await readSmall(request, PAIR_BODY_LIMIT)) ?? '') as typeof input;
+    } catch {}
+    const target =
+      typeof input.deviceId === 'string'
+        ? pairing.list().find((device) => device.id === input.deviceId)
+        : undefined;
+    if (target === undefined) return refuse(response, 404, 'not-found');
+    pairing.revoke(target.id);
+    response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+    response.end(JSON.stringify({ revoked: true, device: { id: target.id, name: target.name } }));
+  };
+
+  const connectOffer = async (
+    request: IncomingMessage,
+    response: ServerResponse,
+  ): Promise<void> => {
+    if (request.method !== 'POST') return refuse(response, 404, 'not-found');
+    const text = await readSmall(request, PAIR_BODY_LIMIT);
+    const verified =
+      text === undefined
+        ? { ok: false as const }
+        : await options.connectOffer!(text, header(request, RELAY_SIGNATURE_HEADER));
+    if (!verified.ok) return refuse(response, 401, 'relay-signature-invalid');
+    const offer = pairing.createOffer({
+      verifierHash: verified.verifierHash,
+      ...(verified.name === undefined ? {} : { name: verified.name }),
+    });
+    response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+    response.end(
+      JSON.stringify({ offer: offer.offer, expiresAt: offer.expiresAt, host: pairing.host() }),
+    );
+  };
+
+  const devicePush = async (
+    request: IncomingMessage,
+    response: ServerResponse,
+    path: string,
+    handler = options.push!,
+  ): Promise<void> => {
+    const admission = pairing.admit(header(request, 'authorization'));
+    if (!admission.ok) return refuse(response, 401, admission.code);
+    let body: Record<string, unknown> = {};
+    if (request.method === 'POST') {
+      const text = await readSmall(request, PAIR_BODY_LIMIT);
+      try {
+        const value = JSON.parse(text ?? '{}') as unknown;
+        if (typeof value === 'object' && value !== null) body = value as Record<string, unknown>;
+      } catch {}
+    }
+    const answer = await handler({
+      method: request.method ?? 'GET',
+      path,
+      deviceId: admission.device.id,
+      body,
+    });
+    response.writeHead(answer.status, {
+      'content-type': 'application/json',
+      'cache-control': 'no-store',
+    });
+    response.end(JSON.stringify(answer.body));
+  };
+
+  const forward = async (
+    request: IncomingMessage,
+    response: ServerResponse,
+    admission: Admission,
+    prefix: string,
+  ): Promise<void> => {
+    if (!admission.ok) return refuse(response, 401, admission.code);
+    const pathname = new URL(request.url ?? '/', 'http://device').pathname;
+    const endpoint = pathname.slice(`${prefix}/api/`.length);
+    if (
+      decodeURIComponent(endpoint)
+        .replace(/\/{2,}/gu, '/')
+        .startsWith('botharness/relationships')
+    )
+      return refuse(response, 403, 'relationship-local-client-required');
+    if (
+      await refuseConnectRpc(request, response, endpoint, () =>
+        log('device-gateway phase=secret-route-refused'),
+      )
+    )
+      return;
+    let session: string;
+    try {
+      session = await hostSession();
+    } catch {
+      return refuse(response, 503, 'host-session-unavailable');
+    }
+    const path = (request.url ?? '/').slice(prefix.length);
+    await new Promise<void>((resolve) => {
+      const upstream = httpRequest(
+        {
+          host: '127.0.0.1',
+          port: options.port(),
+          path,
+          method: request.method,
+          headers: forwardHeaders(request, session),
+        },
+        (answer) => {
+          if (answer.statusCode === 401) {
+            cookie = undefined;
+            answer.resume();
+            refuse(response, 503, 'host-session-unavailable');
+            return resolve();
+          }
+          const headers: Record<string, string | string[]> = {};
+          for (const [name, value] of Object.entries(answer.headers))
+            if (value !== undefined && !HOP_BY_HOP.has(name) && name !== 'set-cookie')
+              headers[name] = value;
+          response.writeHead(answer.statusCode ?? 502, headers);
+          answer.pipe(response);
+          answer.on('end', resolve);
+          answer.on('error', resolve);
+        },
+      );
+      const detach = pairing.attachStream(admission.device.id, () => {
+        upstream.destroy();
+        response.destroy();
+      });
+      response.on('close', () => {
+        detach();
+        upstream.destroy();
+        resolve();
+      });
+      upstream.on('error', () => {
+        if (!response.headersSent) refuse(response, 502, 'host-session-unavailable');
+        else response.destroy();
+        resolve();
+      });
+      request.pipe(upstream);
+    });
+  };
+
+  const openStream = (
+    request: IncomingMessage,
+    session: string,
+    path: string,
+  ): Promise<
+    | { kind: 'upgraded'; answer: IncomingMessage; socket: Duplex; head: Buffer }
+    | { kind: 'refused'; status: number }
+  > =>
+    new Promise((resolve, reject) => {
+      const headers: Record<string, string> = {
+        host: loopback(),
+        cookie: session,
+        ...forwardDeviceRoute(request),
+      };
+      for (const name of WEBSOCKET_HEADERS) {
+        const value = header(request, name);
+        if (value !== undefined) headers[name] = value;
+      }
+      const upstream = httpRequest({
+        host: '127.0.0.1',
+        port: options.port(),
+        path,
+        method: 'GET',
+        headers,
+      });
+      upstream.on('upgrade', (answer, socket, head) =>
+        resolve({ kind: 'upgraded', answer, socket, head }),
+      );
+      upstream.on('response', (answer) => {
+        answer.resume();
+        resolve({ kind: 'refused', status: answer.statusCode ?? 502 });
+      });
+      upstream.on('error', reject);
+      upstream.end();
+    });
+
+  let pendingVideo = 0;
+  const video = async (
+    request: IncomingMessage,
+    response: ServerResponse,
+    admission: Admission,
+  ): Promise<void> => {
+    if (!admission.ok) return refuse(response, 401, admission.code);
+    const send = (result: LocalVideoResult): void => {
+      if (response.destroyed) return;
+      response.writeHead(result.ok ? 200 : 409, {
+        'content-type': 'application/json',
+        'cache-control': 'no-store',
+      });
+      response.end(JSON.stringify(result));
+    };
+    if (isConnectRequest(request)) {
+      request.resume();
+      return send({
+        ok: false,
+        code: 'connect-carrier-required',
+        error: 'Local Computer video requires the paired LAN route.',
+      });
+    }
+    if (request.method !== 'POST') return refuse(response, 404, 'not-found');
+    if (pendingVideo >= LOCAL_VIDEO_LIMITS.pendingRequests) {
+      request.resume();
+      return send({ ok: false, code: 'queue-full', error: 'Too many pending video commands.' });
+    }
+    const cancellation = new AbortController();
+    const timer = setTimeout(() => {
+      cancellation.abort();
+      request.destroy();
+    }, LOCAL_VIDEO_LIMITS.operationTimeoutMs);
+    const detach = pairing.attachStream(admission.device.id, () => {
+      cancellation.abort();
+      request.destroy();
+      response.destroy();
+    });
+    const closed = (): void => {
+      if (!response.writableFinished) cancellation.abort();
+    };
+    response.on('close', closed);
+    pendingVideo += 1;
+    try {
+      const raw = await readSmall(request, LOCAL_VIDEO_LIMITS.requestBytes);
+      if (raw === undefined)
+        return send({
+          ok: false,
+          code: 'request-too-large',
+          error: 'The video command is too large.',
+        });
+      let command: unknown;
+      try {
+        command = JSON.parse(raw) as unknown;
+      } catch {
+        return send({ ok: false, code: 'invalid-input', error: 'The video command must be JSON.' });
+      }
+
+      if (!pairing.check(admission.device.id).ok || cancellation.signal.aborted)
+        return send({
+          ok: false,
+          code: 'device-revoked',
+          error: 'The device connection is no longer admitted.',
+        });
+      const result =
+        options.localVideo === undefined
+          ? {
+              ok: false as const,
+              code: 'not-ready' as const,
+              error: 'Local Computer video is not ready.',
+            }
+          : await options.localVideo({
+              deviceId: admission.device.id,
+              command,
+              signal: cancellation.signal,
+            });
+      send(result);
+    } catch {
+      send({ ok: false, code: 'operation-timeout', error: 'The video command did not complete.' });
+    } finally {
+      pendingVideo -= 1;
+      clearTimeout(timer);
+      detach();
+      response.off('close', closed);
+    }
+  };
+
+  let pendingCalls = 0;
+  const call = async (
+    request: IncomingMessage,
+    response: ServerResponse,
+    admission: Admission,
+  ): Promise<void> => {
+    if (!admission.ok) return refuse(response, 401, admission.code);
+    const send = (result: VoiceCallResult): void => {
+      if (response.destroyed) return;
+      response.writeHead(result.ok ? 200 : 409, {
+        'content-type': 'application/json',
+        'cache-control': 'no-store',
+      });
+      response.end(JSON.stringify(result));
+    };
+    if (isConnectRequest(request)) {
+      request.resume();
+      return send(VOICE_CALL_CONNECT_REFUSAL);
+    }
+    if (request.method !== 'POST') return refuse(response, 404, 'not-found');
+    if (pendingCalls >= VOICE_CALL_LIMITS.pendingRequests) {
+      request.resume();
+      return send({ ok: false, code: 'queue-full', error: 'Too many pending call commands.' });
+    }
+    const cancellation = new AbortController();
+    const started = performance.now();
+    const expire = () => {
+      cancellation.abort();
+      request.destroy();
+    };
+    let timer = setTimeout(expire, VOICE_CALL_LIMITS.operationTimeoutMs);
+    const detach = pairing.attachStream(admission.device.id, () => {
+      cancellation.abort();
+      request.destroy();
+      response.destroy();
+    });
+    const closed = (): void => {
+      if (!response.writableFinished) cancellation.abort();
+    };
+    response.on('close', closed);
+    pendingCalls += 1;
+    try {
+      const raw = await readSmall(request, VOICE_CALL_LIMITS.requestBytes);
+      if (raw === undefined)
+        return send({
+          ok: false,
+          code: 'request-too-large',
+          error: 'The call command is too large.',
+        });
+      let command: unknown;
+      try {
+        command = JSON.parse(raw) as unknown;
+      } catch {
+        return send({ ok: false, code: 'invalid-input', error: 'The call command must be JSON.' });
+      }
+      if (!pairing.check(admission.device.id).ok || cancellation.signal.aborted)
+        return send({
+          ok: false,
+          code: 'device-revoked',
+          error: 'The device connection is no longer admitted.',
+        });
+      if (
+        typeof command === 'object' &&
+        command !== null &&
+        'kind' in command &&
+        command.kind === 'open'
+      ) {
+        clearTimeout(timer);
+        timer = setTimeout(
+          expire,
+          Math.max(0, VOICE_CALL_LIMITS.connectTimeoutMs - (performance.now() - started)),
+        );
+      }
+      send(
+        options.voiceCall === undefined
+          ? { ok: false, code: 'not-ready', error: 'Calls are not ready on this Host.' }
+          : await options.voiceCall({
+              deviceId: admission.device.id,
+              command,
+              signal: cancellation.signal,
+            }),
+      );
+    } catch {
+      send({ ok: false, code: 'operation-timeout', error: 'The call command did not complete.' });
+    } finally {
+      pendingCalls -= 1;
+      clearTimeout(timer);
+      detach();
+      response.off('close', closed);
+    }
+  };
+
+  return {
+    async handle(request, response) {
+      const path = new URL(request.url ?? '/', 'http://device').pathname;
+      if (path === TEAM_PATH || path.startsWith(`${TEAM_PATH}/`)) {
+        if (options.team) return options.team.handle(request, response);
+        return refuse(response, 404, 'not-found');
+      }
+      let decodedPath: string;
+      try {
+        decodedPath = new URL(`http://device${decodeURIComponent(path)}`).pathname
+          .replace(/\/+/gu, '/')
+          .replace(/\/$/u, '');
+      } catch {
+        return refuse(response, 404, 'not-found');
+      }
+      if (crossOrigin(request)) {
+        const origin = hostOrigin(request);
+        if (origin === undefined || !corsPath(path) || header(request, 'cookie') !== undefined)
+          return refuse(response, 403, 'origin-refused');
+        response.setHeader('access-control-allow-origin', origin);
+        response.setHeader('vary', 'origin');
+        if (request.method === 'OPTIONS') return preflight(request, response);
+      }
+      if (path === DEVICE_FEED_READ_PATH) {
+        if (request.method !== 'POST') return refuse(response, 404, 'not-found');
+        const admission = pairing.admit(header(request, 'authorization'));
+        if (!admission.ok) return refuse(response, 401, admission.code);
+        const receipt = pairing.acknowledgeFeed(admission.device.id);
+        if (!receipt.ok) return refuse(response, 401, receipt.code);
+        response.writeHead(200, {
+          'content-type': 'application/json',
+          'cache-control': 'no-store',
+        });
+        response.end(JSON.stringify({ feedReadAt: receipt.device.feedReadAt }));
+        return;
+      }
+      if (path === DEVICE_PAIR_PATH) return pair(request, response);
+      if (path === DEVICE_STREAM_TICKET_PATH) return streamTicket(request, response);
+      if (path === DEVICE_UNPAIR_PATH) return unpair(request, response);
+      if (path === DEVICE_REMOVE_PATH) return remove(request, response);
+      if (options.connectOffer !== undefined && path === DEVICE_CONNECT_OFFER_PATH)
+        return connectOffer(request, response);
+      if (
+        options.activity !== undefined &&
+        (path === DEVICE_ACTIVITY_PREFIX || path.startsWith(`${DEVICE_ACTIVITY_PREFIX}/`))
+      )
+        return devicePush(request, response, path, options.activity);
+      if (
+        options.push !== undefined &&
+        (path === DEVICE_PUSH_PREFIX || path.startsWith(`${DEVICE_PUSH_PREFIX}/`))
+      )
+        return devicePush(request, response, path);
+
+      if (decodedPath === `${DEVICE_GATEWAY_PREFIX}${LOCAL_VIDEO_PATH}`)
+        return video(request, response, pairing.admit(header(request, 'authorization')));
+      if (decodedPath === `${DEVICE_GATEWAY_PREFIX}${VOICE_CALL_PATH}`)
+        return call(request, response, pairing.admit(header(request, 'authorization')));
+      if (path.startsWith(`${DEVICE_GATEWAY_PREFIX}/api/`))
+        return forward(
+          request,
+          response,
+          pairing.admit(header(request, 'authorization')),
+          DEVICE_GATEWAY_PREFIX,
+        );
+      return refuse(response, 404, 'not-found');
+    },
+
+    async upgrade(request, socket, head) {
+      const pathname = new URL(request.url ?? '/', 'http://device').pathname;
+      if (
+        pathname !== DEVICE_MUX_PATH &&
+        !(DEVICE_SIGNALING_PATHS as readonly string[]).includes(pathname)
+      )
+        return refuseUpgrade(socket, 404, 'not-found');
+      const ticketed = pathname === DEVICE_MUX_PATH ? ticketAdmission(request) : undefined;
+      if (crossOrigin(request) && (ticketed === undefined || hostOrigin(request) === undefined))
+        return refuseUpgrade(socket, 403, 'origin-refused');
+      const admission = ticketed ?? pairing.admit(header(request, 'authorization'));
+      if (!admission.ok) return refuseUpgrade(socket, 401, admission.code);
+      const target =
+        pathname === DEVICE_MUX_PATH
+          ? '/api/remote.mux'
+          : (request.url ?? '/').slice(DEVICE_GATEWAY_PREFIX.length);
+      if (pathname === DEVICE_MUX_PATH && isConnectRequest(request)) {
+        let session: string;
+        try {
+          session = await hostSession();
+        } catch {
+          return refuseUpgrade(socket, 503, 'host-session-unavailable');
+        }
+        connectMux(request, socket, head, {
+          url: `ws://${loopback()}/api/remote.mux`,
+          headers: { cookie: session, ...forwardDeviceRoute(request) },
+          attach: (close) => pairing.attachStream(admission.device.id, close),
+          refused: () => log('device-gateway phase=secret-route-refused'),
+          sessionExpired: () => {
+            cookie = undefined;
+          },
+        });
+        return;
+      }
+      let opened: Awaited<ReturnType<typeof openStream>> | undefined;
+      try {
+        opened = await openStream(request, await hostSession(), target);
+        if (opened.kind === 'refused' && opened.status === 401) {
+          cookie = undefined;
+          opened = await openStream(request, await mint(), target);
+        }
+      } catch {
+        opened = undefined;
+      }
+      if (opened === undefined || opened.kind === 'refused')
+        return refuseUpgrade(socket, 503, 'host-session-unavailable');
+      const { answer, socket: upstream, head: upstreamHead } = opened;
+      const lines = ['HTTP/1.1 101 Switching Protocols'];
+      for (let index = 0; index < answer.rawHeaders.length; index += 2) {
+        const name = answer.rawHeaders[index]!;
+        if (name.toLowerCase() !== 'set-cookie')
+          lines.push(`${name}: ${answer.rawHeaders[index + 1]!}`);
+      }
+      socket.write(`${lines.join('\r\n')}\r\n\r\n`);
+      if (upstreamHead.length > 0) socket.write(upstreamHead);
+      if (head.length > 0) upstream.write(head);
+      const close = (): void => {
+        detach();
+        upstream.destroy();
+        socket.destroy();
+      };
+      const detach = pairing.attachStream(admission.device.id, close);
+      upstream.pipe(socket);
+      socket.pipe(upstream);
+      socket.on('close', close);
+      upstream.on('close', close);
+      socket.on('error', close);
+      upstream.on('error', close);
+    },
+  };
+}

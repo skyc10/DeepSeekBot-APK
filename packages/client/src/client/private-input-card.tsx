@@ -1,0 +1,306 @@
+import { ActionButton } from './ds/action-button.js';
+import { MethodRefused } from '../../../../apps/mobile/src/host/client.js';
+import { isConnectRoute } from '../../../../apps/mobile/src/host/route.js';
+import { BridgeCallError } from './bridge.js';
+import { useMessageHost } from './message-host.js';
+import { useId, useRef, useState, type ReactElement } from 'react';
+import { useMountedResource } from './mounted-resource.js';
+import { Input, Tag } from '@deepseek-ai/dsh-client-ui-primitives';
+import type { BridgeActions } from './actions.js';
+import type { BotHarnessTranslate } from './locale.js';
+import { store, type ChannelMessage } from './store.js';
+import type {
+  PrivateInputStatus,
+  PrivateSubmissionRefusal,
+} from '../../../core/src/credentials/contracts.js';
+import { PrivateAccountControls } from './private-account-controls.js';
+import { MessagingHelp } from './messaging-help.js';
+
+const PRIVATE_SUBMISSION_REFUSALS: readonly string[] = [
+  'not-owner',
+  'not-pending',
+  'busy',
+  'invalid-fields',
+  'store-unavailable',
+  'expired',
+  'version-changed',
+  'save-failed',
+  'not-committed',
+] satisfies readonly PrivateSubmissionRefusal[];
+
+type PrivateCardMount = {
+  node: HTMLFormElement;
+  requestId: string;
+  active: boolean;
+  terminal: PrivateInputStatus | undefined;
+};
+
+export function PrivateInputCard({
+  message,
+  actions,
+  channelId: sourceChannelId,
+  t,
+}: {
+  message: ChannelMessage;
+  actions: Pick<
+    BridgeActions,
+    | 'privateInputStatus'
+    | 'privateInputSubmit'
+    | 'privateInputCancel'
+    | 'privateAccountStatus'
+    | 'privateInputReplace'
+    | 'privateAccountRevoke'
+  >;
+  channelId?: string | undefined;
+  t: BotHarnessTranslate;
+}): ReactElement {
+  const host = useMessageHost();
+  const request = message.privateInputRequest!;
+  const channelId =
+    sourceChannelId ?? 'dm-' + (message.author.kind === 'bot' ? message.author.slug : '');
+  const id = useId();
+  const mounted = useRef<PrivateCardMount>();
+  const submitting = useRef(false);
+  const [status, setStatus] = useState<PrivateInputStatus | 'loading'>('loading');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(false);
+  const [routeRefused, setRouteRefused] = useState(false);
+  const [refusal, setRefusal] = useState<string>();
+  const connectBlocked =
+    (host !== undefined &&
+      (host.client.secretInputAllowed?.() === false ||
+        (host.client.secretInputAllowed === undefined &&
+          isConnectRoute(host.client.resource('/').uri)))) ||
+    routeRefused;
+  const [retry, setRetry] = useState(0);
+  const mount = useMountedResource<HTMLFormElement>(
+    (node) => {
+      const replacing = mounted.current?.requestId !== message.id;
+      const lease: PrivateCardMount = {
+        node,
+        requestId: message.id,
+        active: true,
+        terminal: undefined,
+      };
+      mounted.current = lease;
+      submitting.current = false;
+      setStatus('loading');
+      setBusy(false);
+      if (replacing) {
+        setError(false);
+        setRefusal(undefined);
+      }
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const poll = () => {
+        void actions.privateInputStatus?.(channelId, message.id).then(
+          (current) => {
+            if (!lease.active || lease.terminal !== undefined) return;
+            setStatus(current);
+            if (current !== 'pending') {
+              lease.terminal = current;
+              setError(false);
+              node.reset();
+            } else timer = setTimeout(poll, 2500);
+          },
+          () => {
+            if (lease.active && lease.terminal === undefined) setError(true);
+          },
+        );
+      };
+      poll();
+      return () => {
+        lease.active = false;
+        clearTimeout(timer);
+        node.reset();
+      };
+    },
+    [actions, channelId, message.id, retry],
+  );
+  const disabled = status !== 'pending' || busy || actions.privateInputSubmit === undefined;
+  const refusalShown = refusal !== undefined && status !== 'configured';
+  const details = [
+    request.replacesMessageId === undefined ? undefined : t('privateInput.replacementNote'),
+    request.expiresAt === undefined
+      ? undefined
+      : t('privateInput.expiresAt', {
+          time: new Date(request.expiresAt).toLocaleString(),
+        }),
+    t('privateInput.note'),
+    status === 'configured' ? t('privateInput.configured') : undefined,
+  ]
+    .filter((text) => text !== undefined)
+    .join('\n\n');
+  const settle = async (cancel: boolean): Promise<void> => {
+    if (
+      disabled ||
+      (!cancel && connectBlocked) ||
+      submitting.current ||
+      mounted.current?.active !== true ||
+      (host === undefined
+        ? store.getSnapshot().conversation.channel?.id !== channelId
+        : !host.current(channelId))
+    )
+      return;
+    const lease = mounted.current;
+    submitting.current = true;
+    setBusy(true);
+    setError(false);
+    setRefusal(undefined);
+    const values: Record<string, string> = {};
+    try {
+      if (cancel) await actions.privateInputCancel?.(channelId, message.id);
+      else {
+        const data = new FormData(lease.node);
+        for (const field of request.fields) values[field.id] = String(data.get(field.id) ?? '');
+        lease.node.reset();
+        await actions.privateInputSubmit!(channelId, message.id, values);
+      }
+      const current = (await actions.privateInputStatus?.(channelId, message.id)) ?? 'expired';
+      if (lease.active) {
+        if (current !== 'pending') lease.terminal = current;
+        setStatus(current);
+      }
+    } catch (failure) {
+      if (
+        (failure instanceof BridgeCallError || failure instanceof MethodRefused) &&
+        failure.code === 'secret-route-refused'
+      )
+        setRouteRefused(true);
+      if (
+        lease.active &&
+        failure instanceof BridgeCallError &&
+        failure.code === 'private-input-not-accepted'
+      ) {
+        const reason = (failure.details as { reason?: unknown } | undefined)?.reason;
+        setRefusal(
+          typeof reason === 'string' && /^[a-z-]{1,40}$/.test(reason) ? reason : 'unknown',
+        );
+      }
+      if (lease.active && lease.terminal === undefined) {
+        setError(true);
+        setRetry((value) => value + 1);
+      }
+    } finally {
+      for (const key of Object.keys(values)) delete values[key];
+      if (lease.active) {
+        lease.node.reset();
+        submitting.current = false;
+        setBusy(false);
+      }
+    }
+  };
+  return (
+    <form
+      ref={mount}
+      className="bh-question-card bh-private-input-card"
+      autoComplete="off"
+      onSubmit={(event) => {
+        event.preventDefault();
+        void settle(false);
+      }}
+    >
+      <div className="bh-private-input-heading">
+        <div className="bh-grant-request-title">{t('privateInput.title')}</div>
+        {status === 'pending' || status === 'configured' ? (
+          <span role="status" className="bh-private-input-state">
+            <Tag tone={status === 'pending' ? 'warning' : 'neutral'}>
+              {t(status === 'pending' ? 'privateInput.pending' : 'privateInput.received')}
+            </Tag>
+          </span>
+        ) : null}
+        <MessagingHelp title={t('privateInput.title')} text={details} t={t} />
+      </div>
+      <div className="bh-note">
+        {t('privateInput.account')}: {request.account}
+      </div>
+      <div className="bh-question-prompt">{request.purpose}</div>
+      {connectBlocked ? (
+        <div role="status" className="bh-note">
+          {t('privateInput.connectRefused')}
+        </div>
+      ) : null}
+      {status === 'pending' && !connectBlocked ? (
+        request.fields.map((field) => (
+          <div className="bh-question-item" key={field.id}>
+            <label htmlFor={id + field.id}>
+              {field.label}
+              {field.required ? ' *' : ''}
+            </label>
+            <Input
+              id={id + field.id}
+              name={field.id}
+              type="password"
+              required={field.required}
+              maxLength={16384}
+              autoComplete="new-password"
+              disabled={disabled || connectBlocked}
+            />
+          </div>
+        ))
+      ) : status === 'configured' || (status === 'pending' && connectBlocked) ? null : (
+        <div role="status" className="bh-note">
+          {status === 'loading'
+            ? t('approval.loading')
+            : status === 'cancelled'
+              ? t('question.cancelled')
+              : t('privateInput.expired')}
+        </div>
+      )}
+      {status === 'pending' ? (
+        <div className="bh-private-input-actions bh-message-card-actions">
+          <ActionButton
+            icon="check"
+            type="submit"
+            tone="primary"
+            size="sm"
+            busy={busy}
+            disabled={disabled || connectBlocked}
+          >
+            {t('privateInput.submit')}
+          </ActionButton>
+          <ActionButton
+            icon="x"
+            type="button"
+            size="sm"
+            disabled={disabled}
+            onClick={() => void settle(true)}
+          >
+            {t('privateInput.cancel')}
+          </ActionButton>
+        </div>
+      ) : null}
+      {refusalShown ? (
+        <div className="bh-error" role="alert">
+          {t('privateInput.refused', {
+            reason: refusal,
+            detail: PRIVATE_SUBMISSION_REFUSALS.includes(refusal)
+              ? t(`privateInput.refused.${refusal as PrivateSubmissionRefusal}`)
+              : t('privateInput.refused.unknown'),
+          })}
+        </div>
+      ) : null}
+      {error && !routeRefused && !refusalShown ? (
+        <div className="bh-error" role="alert">
+          {t('privateInput.error')}{' '}
+          <ActionButton
+            icon="refresh"
+            type="button"
+            tone="primary"
+            size="sm"
+            onClick={() => setRetry((value) => value + 1)}
+          >
+            {t('question.retry')}
+          </ActionButton>
+        </div>
+      ) : null}
+      {status === 'configured' && actions.privateAccountStatus !== undefined ? (
+        <PrivateAccountControls
+          channelId={channelId}
+          messageId={message.id}
+          actions={actions}
+          t={t}
+        />
+      ) : null}
+    </form>
+  );
+}

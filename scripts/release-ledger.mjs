@@ -1,0 +1,670 @@
+const RELEASE_HEADING = /^## \[([^\]]+)](?: - (\d{4}-\d{2}-\d{2}))?$/;
+const SECTION_HEADING = /^### (.+)$/;
+const MARKDOWN_LINK = /\[[^\]]*]\(([^)]+)\)/g;
+const RELEASE_PROVENANCE =
+  /^- \*\*(Skill version|Verified against DSH|Upstream revision|Skill 版本|核验的 DSH 版本|上游 revision)(?::|：)\*\*\s+(.+)$/;
+const RELEASE_ARTIFACT_EVIDENCE =
+  /^- \*\*(Release tag|Installable artifact|发布 tag|可安装 artifact)(?::|：)\*\*\s+\[[^\]]+]\((https:\/\/[^)]+)\)$/;
+const SEMVER =
+  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+(?:[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/;
+const PROVENANCE_LINK = /^https:\/\/github\.com\/[^/]+\/[^/]+\/(?:issues|pull)\/\d+(?:[?#].*)?$/;
+const UPSTREAM_SHA = /^[0-9a-f]{40}$/;
+const DEEPSEEKBOT_RELEASE_REPOSITORY = 'BotHarness/BotHarness';
+const DSH_SKILL_RELEASE_REPOSITORY = 'BotHarness/dsh-skill';
+
+const PROVENANCE_KEYS = new Map([
+  ['Skill version', 'skillVersion'],
+  ['Skill 版本', 'skillVersion'],
+  ['Verified against DSH', 'verifiedAgainst'],
+  ['核验的 DSH 版本', 'verifiedAgainst'],
+  ['Upstream revision', 'upstreamSha'],
+  ['上游 revision', 'upstreamSha'],
+]);
+
+const EVIDENCE_KEYS = new Map([
+  ['Release tag', 'tagUrl'],
+  ['发布 tag', 'tagUrl'],
+  ['Installable artifact', 'installUrl'],
+  ['可安装 artifact', 'installUrl'],
+]);
+
+export const DEVELOPMENT_SUMMARY_IDENTITY = 'Development';
+
+export const RELEASE_LEDGER_SECTIONS = [
+  'Added',
+  'Changed',
+  'Fixed',
+  'Documentation',
+  'Breaking Changes',
+  'Deprecated',
+  'Removed',
+  'Security',
+];
+
+function linksIn(text) {
+  return [...text.matchAll(MARKDOWN_LINK)].map((match) => match[1]);
+}
+
+function isCalendarDate(value) {
+  if (!value) return false;
+  const instant = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(instant.valueOf()) && instant.toISOString().slice(0, 10) === value;
+}
+
+function provenanceValue(text) {
+  const code = text.match(/`([^`]+)`/)?.[1];
+  return code ?? text.trim();
+}
+
+function parseReleaseLedgerDocument(markdown) {
+  const lines = markdown.replaceAll('\r\n', '\n').split('\n');
+  const releases = [];
+  const unexpectedContent = [];
+  let release;
+  let section;
+
+  for (const [index, line] of lines.entries()) {
+    const releaseMatch = line.match(RELEASE_HEADING);
+    if (releaseMatch) {
+      release = {
+        identity: releaseMatch[1],
+        date: releaseMatch[2],
+        summary: '',
+        sections: [],
+      };
+      releases.push(release);
+      section = undefined;
+      continue;
+    }
+
+    if (!release) continue;
+
+    const sectionMatch = line.match(SECTION_HEADING);
+    if (sectionMatch) {
+      section = { name: sectionMatch[1], entries: [] };
+      release.sections.push(section);
+      continue;
+    }
+
+    const provenanceMatch = line.match(RELEASE_PROVENANCE);
+    if (provenanceMatch && !section) {
+      release.provenance ??= {};
+      const key = PROVENANCE_KEYS.get(provenanceMatch[1]);
+      release.provenance[key] = provenanceValue(provenanceMatch[2]);
+      if (key === 'upstreamSha') {
+        release.provenance.upstreamUrl = linksIn(provenanceMatch[2])[0];
+      }
+      continue;
+    }
+
+    const evidenceMatch = line.match(RELEASE_ARTIFACT_EVIDENCE);
+    if (evidenceMatch && !section) {
+      release.evidence ??= {};
+      release.evidence[EVIDENCE_KEYS.get(evidenceMatch[1])] = evidenceMatch[2];
+      continue;
+    }
+
+    if (line.startsWith('- ') && section) {
+      const text = line.slice(2);
+      section.entries.push({ text, links: linksIn(text) });
+      continue;
+    }
+
+    if (/^\s{2,}\S/.test(line) && section && section.entries.length > 0) {
+      const entry = section.entries.at(-1);
+      entry.text = `${entry.text} ${line.trim()}`;
+      entry.links = linksIn(entry.text);
+      continue;
+    }
+
+    if (!release.summary && !section && line.trim()) {
+      release.summary = line.trim();
+      continue;
+    }
+
+    if (section && line.trim()) {
+      unexpectedContent.push({
+        releaseIdentity: release.identity,
+        sectionName: section.name,
+        line: index + 1,
+      });
+    }
+  }
+
+  return { releases, unexpectedContent };
+}
+
+export function parseReleaseLedger(markdown) {
+  const { releases } = parseReleaseLedgerDocument(markdown);
+  return { releases };
+}
+
+function validateReleaseLedgerForRepository(markdown, source, repository) {
+  const errors = [];
+  const { releases, unexpectedContent } = parseReleaseLedgerDocument(markdown);
+  const headings = markdown.match(/^## .+$/gm) ?? [];
+
+  if (releases.length === 0) {
+    errors.push({ source, code: 'missing-release', message: 'No release sections found.' });
+  }
+  if (headings.length !== releases.length) {
+    errors.push({
+      source,
+      code: 'invalid-release-heading',
+      message: 'Release headings must use ## [Unreleased] or ## [X.Y.Z] - YYYY-MM-DD.',
+    });
+  }
+  if (releases[0]?.identity !== 'Unreleased') {
+    errors.push({
+      source,
+      code: 'unreleased-order',
+      message: 'Unreleased must be the first release section.',
+    });
+  }
+
+  for (const unexpected of unexpectedContent) {
+    errors.push({
+      source,
+      code: 'unexpected-section-content',
+      message: `${unexpected.releaseIdentity} / ${unexpected.sectionName} line ${unexpected.line} must be a change entry starting with "- ".`,
+    });
+  }
+
+  const identities = new Set();
+  for (const release of releases) {
+    if (identities.has(release.identity)) {
+      errors.push({
+        source,
+        code: 'duplicate-release',
+        message: `Release ${release.identity} appears more than once.`,
+      });
+    }
+    identities.add(release.identity);
+
+    if (release.identity === 'Unreleased') {
+      if (release.date) {
+        errors.push({
+          source,
+          code: 'unreleased-date',
+          message: 'Unreleased must not have a release date.',
+        });
+      }
+    } else if (release.identity === DEVELOPMENT_SUMMARY_IDENTITY) {
+      if (!release.date) {
+        errors.push({
+          source,
+          code: 'missing-date',
+          message: 'Development summary needs an ISO cutoff date.',
+        });
+      } else if (!isCalendarDate(release.date)) {
+        errors.push({
+          source,
+          code: 'invalid-date',
+          message: `${release.date} is not a valid ISO calendar date.`,
+        });
+      }
+    } else {
+      if (!SEMVER.test(release.identity)) {
+        errors.push({
+          source,
+          code: 'invalid-version',
+          message: `${release.identity} is not a SemVer release identity.`,
+        });
+      }
+      if (!release.date) {
+        errors.push({
+          source,
+          code: 'missing-date',
+          message: `Release ${release.identity} needs an ISO release date.`,
+        });
+      } else if (!isCalendarDate(release.date)) {
+        errors.push({
+          source,
+          code: 'invalid-date',
+          message: `${release.date} is not a valid ISO calendar date.`,
+        });
+      }
+    }
+
+    if (!release.summary) {
+      errors.push({
+        source,
+        code: 'missing-summary',
+        message: `Release ${release.identity} needs a one-line summary.`,
+      });
+    }
+
+    if (
+      isPublicPreReleaseIdentity(release.identity) &&
+      (!validReleaseTagUrl(release.evidence?.tagUrl, release.identity, repository) ||
+        !validInstallUrl(release.evidence?.installUrl, release.identity, repository))
+    ) {
+      errors.push({
+        source,
+        code: 'missing-prerelease-evidence',
+        message: `Release ${release.identity} needs tagged and installable evidence in ${repository}: the exact GitHub Release tag and a same-tag /releases/download/ asset URL.`,
+      });
+    }
+
+    const sectionNames = new Set();
+    for (const section of release.sections) {
+      if (!RELEASE_LEDGER_SECTIONS.includes(section.name)) {
+        errors.push({
+          source,
+          code: 'unknown-section',
+          message: `${section.name} is not an allowed release section.`,
+        });
+      }
+      if (sectionNames.has(section.name)) {
+        errors.push({
+          source,
+          code: 'duplicate-section',
+          message: `${release.identity} repeats the ${section.name} section.`,
+        });
+      }
+      sectionNames.add(section.name);
+
+      for (const entry of section.entries) {
+        if (!entry.links.some((link) => PROVENANCE_LINK.test(link))) {
+          errors.push({
+            source,
+            code: 'missing-provenance',
+            message: `${release.identity} / ${section.name} has an entry without an Issue or PR link.`,
+          });
+        }
+      }
+      if (section.entries.length === 0) {
+        errors.push({
+          source,
+          code: 'empty-section',
+          message: `${release.identity} / ${section.name} must contain a change entry.`,
+        });
+      }
+    }
+  }
+
+  return errors;
+}
+
+export function validateReleaseLedger(markdown, source = 'ledger') {
+  return validateReleaseLedgerForRepository(markdown, source, DEEPSEEKBOT_RELEASE_REPOSITORY);
+}
+
+function sameValues(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+export function isPublicPreReleaseIdentity(identity) {
+  const prerelease = identity.split('-', 2)[1];
+  return prerelease ? /^(?:alpha|beta|rc)(?:[.-]|$)/i.test(prerelease) : false;
+}
+
+function isExactGitHubUrl(url, parsed) {
+  return (
+    url === `${parsed.origin}${parsed.pathname}` &&
+    parsed.protocol === 'https:' &&
+    parsed.hostname === 'github.com' &&
+    parsed.port === '' &&
+    parsed.username === '' &&
+    parsed.password === '' &&
+    parsed.search === '' &&
+    parsed.hash === ''
+  );
+}
+
+function validReleaseTagUrl(url, identity, repository) {
+  try {
+    const parsed = new URL(url);
+    return (
+      isExactGitHubUrl(url, parsed) &&
+      parsed.pathname === `/${repository}/releases/tag/v${identity}`
+    );
+  } catch {
+    return false;
+  }
+}
+
+function validInstallUrl(url, identity, repository) {
+  try {
+    const parsed = new URL(url);
+    const prefix = `/${repository}/releases/download/v${identity}/`;
+    const asset = parsed.pathname.slice(prefix.length);
+    return (
+      isExactGitHubUrl(url, parsed) &&
+      parsed.pathname.startsWith(prefix) &&
+      asset.length > 0 &&
+      !asset.includes('/')
+    );
+  } catch {
+    return false;
+  }
+}
+
+function validateReleaseLedgerPairForRepository(english, chinese, repository) {
+  const errors = [
+    ...validateReleaseLedgerForRepository(english, 'CHANGELOG.md', repository),
+    ...validateReleaseLedgerForRepository(chinese, 'CHANGELOG.zh.md', repository),
+  ];
+  const en = parseReleaseLedger(english).releases;
+  const zh = parseReleaseLedger(chinese).releases;
+
+  const enIdentity = en.map(({ identity, date }) => [identity, date]);
+  const zhIdentity = zh.map(({ identity, date }) => [identity, date]);
+  if (!sameValues(enIdentity, zhIdentity)) {
+    errors.push({
+      source: 'bilingual',
+      code: 'release-parity',
+      message: 'English and Chinese release identities or dates differ.',
+    });
+  }
+
+  const count = Math.min(en.length, zh.length);
+  for (let index = 0; index < count; index += 1) {
+    const enRelease = en[index];
+    const zhRelease = zh[index];
+    const enSections = enRelease.sections.map((section) => section.name);
+    const zhSections = zhRelease.sections.map((section) => section.name);
+    if (!sameValues(enSections, zhSections)) {
+      errors.push({
+        source: 'bilingual',
+        code: 'section-parity',
+        message: `${enRelease.identity} has different English and Chinese sections.`,
+      });
+    }
+
+    const enEntryCounts = enRelease.sections.map((section) => section.entries.length);
+    const zhEntryCounts = zhRelease.sections.map((section) => section.entries.length);
+    if (!sameValues(enEntryCounts, zhEntryCounts)) {
+      errors.push({
+        source: 'bilingual',
+        code: 'entry-parity',
+        message: `${enRelease.identity} has different English and Chinese entry counts.`,
+      });
+    }
+
+    const correspondingLinksDiffer = enRelease.sections.some((enSection, sectionIndex) => {
+      const zhSection = zhRelease.sections[sectionIndex];
+      if (!zhSection) return false;
+      return enSection.entries.some((enEntry, entryIndex) => {
+        const zhEntry = zhSection.entries[entryIndex];
+        return zhEntry ? !sameValues(enEntry.links, zhEntry.links) : false;
+      });
+    });
+    if (correspondingLinksDiffer) {
+      errors.push({
+        source: 'bilingual',
+        code: 'link-parity',
+        message: `${enRelease.identity} has different English and Chinese link targets in corresponding entries.`,
+      });
+    }
+
+    if (
+      !sameValues(
+        [enRelease.evidence?.tagUrl, enRelease.evidence?.installUrl],
+        [zhRelease.evidence?.tagUrl, zhRelease.evidence?.installUrl],
+      )
+    ) {
+      errors.push({
+        source: 'bilingual',
+        code: 'prerelease-evidence-parity',
+        message: `${enRelease.identity} has different English and Chinese tag or install evidence.`,
+      });
+    }
+  }
+
+  return errors;
+}
+
+export function validateReleaseLedgerPair(english, chinese) {
+  return validateReleaseLedgerPairForRepository(english, chinese, DEEPSEEKBOT_RELEASE_REPOSITORY);
+}
+
+function sameProvenance(left, right) {
+  return sameValues(
+    left ? [left.skillVersion, left.verifiedAgainst, left.upstreamSha, left.upstreamUrl] : null,
+    right
+      ? [right.skillVersion, right.verifiedAgainst, right.upstreamSha, right.upstreamUrl]
+      : null,
+  );
+}
+
+export function validateDshSkillReleaseLedgerPair(english, chinese, current) {
+  const errors = validateReleaseLedgerPairForRepository(
+    english,
+    chinese,
+    DSH_SKILL_RELEASE_REPOSITORY,
+  );
+  const en = parseReleaseLedger(english).releases;
+  const zh = parseReleaseLedger(chinese).releases;
+
+  for (const release of en.filter(({ identity }) => identity !== 'Unreleased')) {
+    const provenance = release.provenance;
+    if (!provenance?.skillVersion || !provenance.verifiedAgainst || !provenance.upstreamSha) {
+      errors.push({
+        source: 'DSH Skill',
+        code: 'missing-release-provenance',
+        message: `${release.identity} needs Skill version, verified DSH version, and upstream revision.`,
+      });
+      continue;
+    }
+    if (provenance.skillVersion !== release.identity) {
+      errors.push({
+        source: 'DSH Skill',
+        code: 'skill-version-mismatch',
+        message: `${release.identity} declares Skill version ${provenance.skillVersion}.`,
+      });
+    }
+    const expectedUrl = `https://github.com/deepseek-ai/deepseek-harness/commit/${provenance.upstreamSha}`;
+    if (!UPSTREAM_SHA.test(provenance.upstreamSha) || provenance.upstreamUrl !== expectedUrl) {
+      errors.push({
+        source: 'DSH Skill',
+        code: 'invalid-upstream-revision',
+        message: `${release.identity} needs a full upstream SHA linked to its DSH commit.`,
+      });
+    }
+  }
+
+  for (let index = 0; index < Math.min(en.length, zh.length); index += 1) {
+    if (!sameProvenance(en[index].provenance, zh[index].provenance)) {
+      errors.push({
+        source: 'bilingual',
+        code: 'provenance-parity',
+        message: `${en[index].identity} has different English and Chinese Skill provenance.`,
+      });
+    }
+  }
+
+  if (current) {
+    const release = en.find(({ identity }) => identity === current.skillVersion);
+    if (!release) {
+      errors.push({
+        source: 'DSH Skill',
+        code: 'current-release-missing',
+        message: `Current Skill version ${current.skillVersion} is missing from release history.`,
+      });
+    } else if (
+      !sameValues(
+        [
+          release.provenance?.skillVersion,
+          release.provenance?.verifiedAgainst,
+          release.provenance?.upstreamSha,
+        ],
+        [current.skillVersion, current.verifiedAgainst, current.upstreamSha],
+      )
+    ) {
+      errors.push({
+        source: 'DSH Skill',
+        code: 'current-provenance-mismatch',
+        message: `Release ${current.skillVersion} does not match SKILL.md provenance.`,
+      });
+    }
+  }
+
+  return errors;
+}
+
+const FRAGMENT_LANGUAGES = new Map([
+  ['en', 'english'],
+  ['zh', 'chinese'],
+]);
+
+function fragmentEntries(lines) {
+  const entries = [];
+  const unexpected = [];
+  for (const line of lines) {
+    if (line.startsWith('- ')) {
+      entries.push([line]);
+    } else if (/^\s{2,}\S/.test(line) && entries.length > 0) {
+      entries.at(-1).push(line);
+    } else if (line.trim()) {
+      unexpected.push(line);
+    }
+  }
+  return {
+    entries: entries.map((entryLines) => {
+      const text = entryLines.map((line, index) => (index === 0 ? line.slice(2) : line.trim()));
+      return { lines: entryLines, text: text.join(' '), links: linksIn(text.join(' ')) };
+    }),
+    unexpected,
+  };
+}
+
+export function parseChangeFragment(markdown, source = 'fragment') {
+  const errors = [];
+  const lines = markdown.replaceAll('\r\n', '\n').split('\n');
+  const frontMatter = lines[0] === '---' ? lines.indexOf('---', 1) : -1;
+  const section =
+    frontMatter > 0
+      ? lines
+          .slice(1, frontMatter)
+          .map((line) => line.match(/^section:\s*(.+?)\s*$/)?.[1])
+          .find(Boolean)
+      : undefined;
+
+  if (!section) {
+    errors.push({
+      source,
+      code: 'fragment-section',
+      message: 'A change fragment starts with front matter that names its section.',
+    });
+  } else if (!RELEASE_LEDGER_SECTIONS.includes(section)) {
+    errors.push({
+      source,
+      code: 'unknown-section',
+      message: `${section} is not an allowed release section.`,
+    });
+  }
+
+  const blocks = { english: [], chinese: [] };
+  const seen = new Set();
+  let language;
+  const stray = [];
+  for (const line of lines.slice(frontMatter > 0 ? frontMatter + 1 : 0)) {
+    const heading = line.match(/^## (\S+)\s*$/);
+    if (heading) {
+      language = FRAGMENT_LANGUAGES.get(heading[1]);
+      if (!language || seen.has(language)) {
+        errors.push({
+          source,
+          code: 'fragment-language',
+          message: `Use exactly one "## en" and one "## zh" block, not "${line}".`,
+        });
+        language = undefined;
+        continue;
+      }
+      seen.add(language);
+      continue;
+    }
+    if (language) blocks[language].push(line);
+    else if (line.trim()) stray.push(line);
+  }
+
+  const english = fragmentEntries(blocks.english);
+  const chinese = fragmentEntries(blocks.chinese);
+  for (const line of [...stray, ...english.unexpected, ...chinese.unexpected]) {
+    errors.push({
+      source,
+      code: 'unexpected-section-content',
+      message: `"${line.trim()}" must be a change entry starting with "- ".`,
+    });
+  }
+  if (english.entries.length === 0 || chinese.entries.length === 0) {
+    errors.push({
+      source,
+      code: 'empty-section',
+      message: 'A change fragment needs at least one entry under both "## en" and "## zh".',
+    });
+  } else if (english.entries.length !== chinese.entries.length) {
+    errors.push({
+      source,
+      code: 'entry-parity',
+      message: 'The English and Chinese blocks have different entry counts.',
+    });
+  }
+  for (const entry of [...english.entries, ...chinese.entries]) {
+    if (!entry.links.some((link) => PROVENANCE_LINK.test(link))) {
+      errors.push({
+        source,
+        code: 'missing-provenance',
+        message: 'Every change entry links at least one Issue or PR.',
+      });
+    }
+  }
+  if (
+    english.entries.some(
+      (entry, index) =>
+        chinese.entries[index] && !sameValues(entry.links, chinese.entries[index].links),
+    )
+  ) {
+    errors.push({
+      source,
+      code: 'link-parity',
+      message: 'Corresponding English and Chinese entries have different link targets.',
+    });
+  }
+
+  return { section, english: english.entries, chinese: chinese.entries, errors };
+}
+
+function addToUnreleased(markdown, additions) {
+  const lines = markdown.replaceAll('\r\n', '\n').split('\n');
+  const start = lines.findIndex((line) => line.match(RELEASE_HEADING)?.[1] === 'Unreleased');
+  if (start < 0 || additions.length === 0) return markdown;
+  const blockEnd = () => {
+    const next = lines.findIndex((line, index) => index > start && line.startsWith('## '));
+    return next < 0 ? lines.length : next;
+  };
+  const lastContent = (from, to) => {
+    let index = to;
+    while (index > from && !lines[index - 1].trim()) index -= 1;
+    return index;
+  };
+
+  for (const { section, entries } of additions) {
+    const end = blockEnd();
+    const heading = lines.findIndex(
+      (line, index) => index > start && index < end && line === `### ${section}`,
+    );
+    const body = entries.flatMap((entry) => ['', ...entry.lines]);
+    if (heading < 0) {
+      lines.splice(lastContent(start, end), 0, '', `### ${section}`, ...body);
+      continue;
+    }
+    const next = lines.findIndex(
+      (line, index) => index > heading && index < end && line.startsWith('### '),
+    );
+    lines.splice(lastContent(heading, next < 0 ? end : next), 0, ...body);
+  }
+  return lines.join('\n');
+}
+
+export function composeReleaseLedgerPair(english, chinese, fragments) {
+  const additions = (language) =>
+    fragments
+      .filter((fragment) => fragment.section && fragment.errors.length === 0)
+      .map((fragment) => ({ section: fragment.section, entries: fragment[language] }));
+  return {
+    english: addToUnreleased(english, additions('english')),
+    chinese: addToUnreleased(chinese, additions('chinese')),
+  };
+}
