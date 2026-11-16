@@ -96,8 +96,8 @@ describe('appearance model - wallpaper media', () => {
   });
 
   it('clamps wallpaper fade into 0..100 with a safe default for non-numbers', () => {
-    const fadeOf = (fade: unknown) => {
-      const wallpaper = coerceWallpaper({
+    const fadeOf = (fade: unknown): number | undefined => {
+      const media = coerceWallpaper({
         kind: 'image',
         id: 'wp.jpg',
         fit: 'cover',
@@ -105,7 +105,7 @@ describe('appearance model - wallpaper media', () => {
         y: 0.5,
         fade,
       });
-      return wallpaper?.kind === 'image' ? wallpaper.fade : undefined;
+      return media !== undefined && media.kind !== 'color' ? media.fade : undefined;
     };
     expect(fadeOf(0)).toBe(0);
     expect(fadeOf(100)).toBe(100);
@@ -128,9 +128,9 @@ describe('appearance model - wallpaper media', () => {
   it('paintSource falls back to video poster', () => {
     expect(paintSource(undefined)).toBeUndefined();
     expect(paintSource({ kind: 'color', color: '#fff' })).toBeUndefined();
-    expect(
-      paintSource({ kind: 'image', id: 'a.jpg', fit: 'cover', x: 0.5, y: 0.5, fade: 60 }),
-    ).toBe('a.jpg');
+    expect(paintSource({ kind: 'image', id: 'a.jpg', fit: 'cover', x: 0.5, y: 0.5, fade: 60 })).toBe(
+      'a.jpg',
+    );
     expect(
       paintSource({
         kind: 'video',

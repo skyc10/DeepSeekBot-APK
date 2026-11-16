@@ -1,8 +1,6 @@
 import { MethodRefused } from './client';
 import type { HostClient } from './host-settings';
 
-export type { HostClient } from './host-settings';
-
 export type CredentialInfo = {
   configured: boolean;
   source?: string;

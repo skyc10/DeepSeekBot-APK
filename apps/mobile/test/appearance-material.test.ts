@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { APPEARANCE_PRIMARY, resolveMaterial, resolveTheme } from '../src/ui/design/resolve-theme';
+import {
+  APPEARANCE_PRIMARY,
+  resolveMaterial,
+  resolveTheme,
+} from '../src/ui/design/resolve-theme';
 
 describe('resolveTheme - preset drives primary', () => {
   it('uses the preset primary for light and dark', () => {
