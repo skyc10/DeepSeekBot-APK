@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { hostSettingsDrafts } from './host-settings-drafts.js';
 import * as stylex from '@stylexjs/stylex';
 import { Checkbox } from '@deepseek-ai/dsh-client-ui-primitives';
@@ -15,7 +15,6 @@ import {
   modelScopeKey,
   modelSettingsResource,
   modelSourceText,
-  recordModelSource,
   saveModelPreset,
   setModelRoute,
   subscribeModelSource,

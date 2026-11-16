@@ -1,4 +1,4 @@
-import { useEffect, useState, useSyncExternalStore, type ComponentType } from 'react';
+import { useState, useSyncExternalStore, type ComponentType } from 'react';
 import { SectionList } from 'react-native';
 
 import {
@@ -19,7 +19,6 @@ import {
   classifyModelList,
   getModelSourceSnapshot,
   modelSourceText,
-  recordModelSource,
   subscribeModelSource,
 } from '../../host/model-settings';
 import { Text } from '../primitives/text';

@@ -1,7 +1,6 @@
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import {
   useCallback,
-  useEffect,
   useMemo,
   useRef,
   useState,
@@ -22,7 +21,6 @@ import {
   modelSourceText,
   classifyModelList,
   getModelSourceSnapshot,
-  recordModelSource,
   saveModelPreset,
   searchModels,
   subscribeModelSource,

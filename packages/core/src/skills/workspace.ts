@@ -54,17 +54,14 @@ function definition(
     )
   )
     return undefined;
-  const disableModelInvocation = booleanField(fields, 'disable-model-invocation');
+  booleanField(fields, 'disable-model-invocation');
   return {
     name,
     description,
     source,
     path,
     content: raw.slice(frontmatter[0].length).trim(),
-    invocation: {
-      userInvocable: booleanField(fields, 'user-invocable') !== false,
-      modelInvocable: disableModelInvocation !== true,
-    },
+    invocation: { userInvocable: booleanField(fields, 'user-invocable') !== false },
   };
 }
 
