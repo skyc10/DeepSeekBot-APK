@@ -108,7 +108,10 @@ export function coerceWallpaper(value: unknown): WallpaperMedia | undefined {
     fit: raw['fit'] === 'contain' ? ('contain' as const) : ('cover' as const),
     x: finite(raw['x'], 0, 1) ? raw['x'] : 0.5,
     y: finite(raw['y'], 0, 1) ? raw['y'] : 0.5,
-    fade: finite(raw['fade'], 0, 100) ? raw['fade'] : 60,
+    fade:
+      typeof raw['fade'] === 'number' && Number.isFinite(raw['fade'])
+        ? Math.max(0, Math.min(100, raw['fade']))
+        : 60,
   });
   if (value['kind'] === 'color') {
     return typeof value['color'] === 'string' && HEX.test(value['color'])

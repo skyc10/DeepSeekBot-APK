@@ -29,7 +29,6 @@ export function AppWallpaper() {
         transition={0}
         style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 }}
       />
-      {/* Theme-canvas scrim keeps foreground text readable; its color follows the active mode. */}
       <View
         style={{
           position: 'absolute',

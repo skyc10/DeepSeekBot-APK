@@ -61,7 +61,7 @@ export async function describeCredentials(
 function redact(message: string, secrets: readonly string[]): string {
   let result = message;
   for (const secret of secrets) {
-    if (secret.length === 0) continue;
+    if (secret.length < 4) continue;
     result = result
       .split(secret)
       .join('[redacted]')

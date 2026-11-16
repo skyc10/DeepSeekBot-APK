@@ -186,7 +186,11 @@ export function resolveTheme(
   const scheme =
     appearance.scheme === undefined || appearance.scheme === 'system' ? system : appearance.scheme;
   const preset = appearance.preset ?? 'classic-blue';
-  const primary = appearance.accent ?? appearance.primary ?? APPEARANCE_PRIMARY[preset][scheme];
+  const supplied = appearance.accent;
+  const primary =
+    supplied !== undefined && HEX.test(supplied)
+      ? supplied
+      : (appearance.primary ?? APPEARANCE_PRIMARY[preset][scheme]);
   const color = withAccent({ ...palette[scheme] }, primary);
   const style = appearance.style ?? 'default';
   const glass = appearance.materialEnabled === true && (style === 'glass' || style === 'image');

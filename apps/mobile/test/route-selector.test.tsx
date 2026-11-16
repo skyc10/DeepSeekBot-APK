@@ -69,7 +69,7 @@ describe('RouteSelector', () => {
   it('uses localized copy and shows an error notice when switching fails', async () => {
     fixture.setRoutePreference.mockRejectedValue(new Error('refused'));
     const view = await render();
-    expect(view.textContent).toContain(t.routeSelector.title);
+    expect(view.querySelector(`[aria-label="${t.routeSelector.title}"]`)).not.toBeNull();
     expect(view.textContent).not.toContain('Switch to Tailscale or LAN for full settings access.');
 
     const lan = view.querySelector<HTMLButtonElement>(`[aria-label="${t.routeSelector.lan}"]`)!;
