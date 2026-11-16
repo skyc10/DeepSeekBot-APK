@@ -76,8 +76,12 @@ describe('IM app setup screen', () => {
         kind: 'credentials' as const,
       },
     ];
-    const start = vi.fn(async () => ({ kind: 'ok', attempt: credentialsAttempt }) as AppSetupResult);
-    const credentials = vi.fn(async () => ({ kind: 'ok', attempt: credentialsAttempt }) as AppSetupResult);
+    const start = vi.fn(
+      async () => ({ kind: 'ok', attempt: credentialsAttempt }) as AppSetupResult,
+    );
+    const credentials = vi.fn(
+      async () => ({ kind: 'ok', attempt: credentialsAttempt }) as AppSetupResult,
+    );
     const port: AppSetupPort = {
       setups: vi.fn(async () => ({ kind: 'ok', setups }) as AppSetupsResult),
       start,
