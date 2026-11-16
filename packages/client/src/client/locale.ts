@@ -5845,7 +5845,8 @@ export const en = {
   'modelPreset.onlyOne': 'Only one model was returned. More may not have loaded. Refresh.',
   'modelPreset.catalogDebug': 'catalog: {count} · source: {source}',
   'environment.settings.moreHost': 'More settings',
-  'environment.settings.legacyScope': 'Host controls use This Host. Device preferences stay on this device.',
+  'environment.settings.legacyScope':
+    'Host controls use This Host. Device preferences stay on this device.',
   'remoteHosts.settings.title': 'Settings for {name}',
   'approval.effect.changes.none': 'Read only',
   'approval.effect.changes.reversible': 'Reversible changes',
