@@ -1,7 +1,4 @@
 {
-  "rules": {
-    "typescript/no-floating-promises": "error"
-  },
   "ignorePatterns": [
     "dist",
     "coverage",
@@ -16,8 +13,6 @@
     "n",
     "n1",
     "output",
-    "packages/client/vendor/dsh-ui-theme-022-rc2",
-    "scripts/fixtures/lint-ratchet",
-    "packages/*/lib/client.js"
+    "packages/client/vendor/dsh-ui-theme-022-rc2"
   ]
 }

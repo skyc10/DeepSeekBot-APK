@@ -15,7 +15,7 @@ import { useRemoteHosts } from './host-tabs.js';
 import { useThisHost } from './this-host.js';
 import { useHostLook, useHostName } from './host-looks.js';
 import { HostGlyph } from './host-glyph.js';
-import { openHostSettings } from './environment-settings-source.js';
+import { HostSettings } from './host-settings.js';
 import { ConnectionsDialog } from './connections-dialog.js';
 import { ChannelSidebarIcon } from './channel-sidebar-icon.js';
 import { Select } from './ds/select.js';
@@ -330,6 +330,7 @@ function OwnerEnvironmentPanel({ t }: { t: BotHarnessTranslate }): ReactElement 
       : undefined,
   );
   const localStatus = useClientStore((state) => state.activityList.attentionStatus);
+  const [settings, setSettings] = useState<{ hostId: string; name: string; local: boolean }>();
   return (
     <div {...stylex.props(styles.root)} data-environment-panel="">
       <div {...stylex.props(styles.list)}>
@@ -355,9 +356,13 @@ function OwnerEnvironmentPanel({ t }: { t: BotHarnessTranslate }): ReactElement 
               : t(localStatus === 'error' ? 'environment.unavailable' : 'environment.loading')
           }
           selected={snapshot.tab === THIS_HOST}
-          onManage={() => {
-            openHostSettings();
-          }}
+          onManage={() =>
+            setSettings({
+              hostId: local.id ?? THIS_HOST,
+              name: local.name ?? t('remoteHosts.this'),
+              local: true,
+            })
+          }
           t={t}
         />
         {snapshot.hosts.map((remote) => (
@@ -388,13 +393,21 @@ function OwnerEnvironmentPanel({ t }: { t: BotHarnessTranslate }): ReactElement 
                       )
                   : t('environment.offline')
             }
-            onManage={() => {
-              openHostSettings({ hostId: remote.host.hostId, hostName: remote.host.hostName });
-            }}
+            onManage={() =>
+              setSettings({ hostId: remote.host.hostId, name: remote.host.hostName, local: false })
+            }
             t={t}
           />
         ))}
       </div>
+      {settings ? (
+        <HostSettings
+          key={settings.hostId}
+          {...settings}
+          t={t}
+          onClose={() => setSettings(undefined)}
+        />
+      ) : null}
     </div>
   );
 }

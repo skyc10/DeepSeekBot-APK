@@ -1,7 +1,5 @@
-import type { ToolEffects } from '../../../../packages/core/src/workspaces/tool-effects';
 import type { BotPrimaryColor } from '../../../../packages/core/src/bots/primary-color';
 import type { ChannelReplyPreviewMedia } from '../../../../packages/core/src/channels/reply-preview';
-import type { SkillOwner } from '../../../../packages/core/src/skills/entries';
 
 export type AggregatedState = 'idle' | 'thinking' | 'working' | 'waiting' | 'blocked';
 
@@ -65,18 +63,10 @@ export interface WireDelivery {
   state: WireDeliveryState;
 }
 
-export interface WireSkillInvocation {
-  name: string;
-  owner: SkillOwner;
-  start: number;
-  end: number;
-}
-
 export interface ChannelWireMessage extends WireMessage {
   contentPurge?: unknown;
   author: WireAuthor;
   mentions?: WireMention[];
-  skillInvocations?: WireSkillInvocation[];
   replyTo?: string;
   replyToPreview?: WireReplyPreview | null;
   reactions?: WireReaction[];
@@ -457,7 +447,7 @@ export interface ClientRequest {
   type: 'client-request';
   rpcId: string;
   method: string;
-  payload: { args: Record<string, unknown> };
+  payload: Record<string, unknown>;
 }
 
 export type MuxClientFrame =
@@ -564,7 +554,6 @@ export interface HumanAttentionPage {
 }
 
 export interface ToolApprovalRequestCard {
-  effects?: ToolEffects;
   toolName: string;
   role: 'orchestrator' | 'assignment';
   cwd: string;

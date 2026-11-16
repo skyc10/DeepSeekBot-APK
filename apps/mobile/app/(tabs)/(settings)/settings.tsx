@@ -17,6 +17,7 @@ import { SHEET_GROUP } from '../../../src/ui/chat/sheet';
 import { SettingsRow } from '../../../src/ui/primitives/settings-row';
 import { useStrings } from '../../../src/ui/strings';
 import { SettingsView } from '../../../src/ui/settings-view';
+import { RouteSelector } from '../../../src/ui/shell/route-selector';
 import { AccountProfileRow } from '../../../src/ui/shell/account-profile-row';
 import { SettingsTabPage } from '../../../src/ui/shell/settings-tab-page';
 
@@ -41,6 +42,15 @@ export default function SettingsScreen() {
         messageDisplay={<MessageDisplaySetting />}
         sendJump={<SendJumpSetting />}
         activityCount={<ActivityCountLink />}
+        theme={
+          <SettingsRow
+            on={SHEET_GROUP}
+            title={t.themeSettings.title}
+            icon="appearance"
+            disclosure
+            onPress={() => router.push('/settings/appearance')}
+          />
+        }
         hapticFeedback={<HapticFeedbackSetting />}
         deliveryReceipts={<DeliveryReceiptSetting />}
         chatBackground={
@@ -52,6 +62,7 @@ export default function SettingsScreen() {
             onPress={() => router.push('/settings/chat-background')}
           />
         }
+        routeSelector={<RouteSelector />}
         key={saved?.hostId}
         loadUsage={usage}
         version={appBuildLabel(currentAppBuild())}
@@ -60,6 +71,10 @@ export default function SettingsScreen() {
           onAppIcon: () => router.push('/settings/app-icon'),
           onNotifications: () => router.push('/settings/notifications'),
           onStorage: () => router.push('/settings/storage'),
+          onHostSettings: () => router.push('/settings/host-settings'),
+          onCredentials: () => router.push('/settings/credentials'),
+          onCloudConnections: () => router.push('/settings/cloud-connections'),
+          onAppSetup: () => router.push('/settings/app-setup'),
           onModels: () => router.push('/settings/models'),
           onCopyVersion: copyMessage,
         }}

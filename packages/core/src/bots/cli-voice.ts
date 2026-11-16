@@ -1,4 +1,3 @@
-export { VOICE_OPTIONS } from './cli-option-spec.js';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 
@@ -9,6 +8,15 @@ import type { BotCreateCliIo } from './bot-create-cli.js';
 import { CliLiveError } from './cli-live-error.js';
 
 type Rpc = (method: string, payload: Record<string, unknown>) => Promise<unknown>;
+
+export const VOICE_OPTIONS = {
+  'base-url': { type: 'string' },
+  'key-stdin': { type: 'boolean' },
+  voice: { type: 'string' },
+  text: { type: 'string' },
+  markdown: { type: 'boolean' },
+  language: { type: 'string' },
+} as const;
 
 export interface VoiceValues {
   dir?: string;

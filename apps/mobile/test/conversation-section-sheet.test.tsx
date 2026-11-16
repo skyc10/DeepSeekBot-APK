@@ -4,7 +4,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 vi.mock('expo-symbols', () => ({ SymbolView: () => null }));
 
-await vi.hoisted(async () => {
+vi.hoisted(async () => {
   const { createRequire, Module } = await import('node:module');
   const requireAsset = createRequire(import.meta.url);
   for (const name of ['close', 'back', 'add', 'check']) {

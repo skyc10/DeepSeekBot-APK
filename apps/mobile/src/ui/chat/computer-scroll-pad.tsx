@@ -102,15 +102,10 @@ export function ComputerScrollPad({
         onAccessibilityAction={({ nativeEvent }) => {
           if (!enabled) return;
           const action = nativeEvent.actionName;
-          const axis =
-            action === 'increment' || action === 'decrement'
-              ? 'vertical'
-              : action === 'scroll-left' || action === 'scroll-right'
-                ? 'horizontal'
-                : undefined;
-          if (axis === undefined) return;
-          const steps = action === 'increment' || action === 'scroll-right' ? 1 : -1;
-          void onScroll(axis, steps).catch(() => false);
+          if (action === 'increment' || action === 'decrement')
+            onScroll('vertical', action === 'increment' ? 1 : -1);
+          if (action === 'scroll-left' || action === 'scroll-right')
+            onScroll('horizontal', action === 'scroll-right' ? 1 : -1);
         }}
         onLayout={({ nativeEvent }) => size.set(nativeEvent.layout)}
         style={{

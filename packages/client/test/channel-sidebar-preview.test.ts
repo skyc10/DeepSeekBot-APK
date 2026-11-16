@@ -115,9 +115,7 @@ function click(label: string) {
   act(() => button(label).click());
 }
 function hover(label: string) {
-  act(() => {
-    button(label).dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-  });
+  act(() => button(label).dispatchEvent(new MouseEvent('mouseover', { bubbles: true })));
 }
 function expanded() {
   return [...host.querySelectorAll<HTMLElement>('[data-entry-id]')]
@@ -195,18 +193,16 @@ describe('temporary sidebar settings preview', () => {
     render();
     click('sidebar.settings');
     const trigger = button('entry.memoryEvolution · memory.terminology');
-    act(() => {
-      trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
-    });
-    act(() => {
-      vi.runAllTimers();
-    });
+    act(() =>
+      trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true })),
+    );
+    act(() => vi.runAllTimers());
     expect(document.activeElement?.textContent).toBe('memory.terms.memory');
-    act(() => {
+    act(() =>
       document.activeElement?.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
-      );
-    });
+      ),
+    );
     expect(expanded()).toEqual(['files', 'sessions']);
     expect(host.querySelector('[role=menu]')).toBeNull();
   });

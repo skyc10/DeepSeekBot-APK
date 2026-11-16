@@ -3,6 +3,7 @@ import {
   type SkillCatalogEntry,
   type SkillOwner,
 } from '../../../core/src/skills/entries.js';
+import type { BotSummary } from './store.js';
 
 export interface SelectedSkill {
   name: string;
@@ -16,6 +17,8 @@ export interface SkillQuery {
   end: number;
   query: string;
 }
+
+export type ComposerSkillOption = SkillCatalogEntry & { bot?: BotSummary | undefined };
 
 export function sameSkillOwner(left: SkillOwner, right: SkillOwner): boolean {
   return skillOwnerKey(left) === skillOwnerKey(right);
@@ -64,7 +67,7 @@ export function selectSkill(
   value: string,
   skills: readonly SelectedSkill[],
   query: SkillQuery,
-  option: Pick<SkillCatalogEntry, 'name' | 'owner'>,
+  option: Pick<ComposerSkillOption, 'name' | 'owner'>,
 ): { value: string; skills: SelectedSkill[]; caret: number } {
   const token = '/' + option.name;
   const trailing = value[query.end] === ' ' ? '' : ' ';

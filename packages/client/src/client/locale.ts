@@ -4,6 +4,11 @@ import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots';
 export const LOCALE_NS = 'botharness';
 
 export const zh = {
+  'modelPreset.onlyOne': '只返回 1 个模型，可能还有更多未加载。请刷新。',
+  'modelPreset.catalogDebug': 'catalog: {count} · source: {source}',
+  'environment.settings.moreHost': '更多设置',
+  'environment.settings.legacyScope': '主机选项只作用于本机 Host；设备偏好只保存在当前设备。',
+  'remoteHosts.settings.title': '{name} 的设置',
   'approval.effect.changes.none': '只读',
   'approval.effect.changes.reversible': '可撤销更改',
   'approval.effect.changes.irreversible': '不可撤销',
@@ -5837,6 +5842,11 @@ export function zhTranslate(key: BotHarnessKey | string, params?: Record<string,
 }
 
 export const en = {
+  'modelPreset.onlyOne': 'Only one model was returned. More may not have loaded. Refresh.',
+  'modelPreset.catalogDebug': 'catalog: {count} · source: {source}',
+  'environment.settings.moreHost': 'More settings',
+  'environment.settings.legacyScope': 'Host controls use This Host. Device preferences stay on this device.',
+  'remoteHosts.settings.title': 'Settings for {name}',
   'approval.effect.changes.none': 'Read only',
   'approval.effect.changes.reversible': 'Reversible changes',
   'approval.effect.changes.irreversible': 'Irreversible',
