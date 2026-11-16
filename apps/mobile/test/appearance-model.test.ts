@@ -96,8 +96,8 @@ describe('appearance model - wallpaper media', () => {
   });
 
   it('clamps wallpaper fade into 0..100 with a safe default for non-numbers', () => {
-    const fadeOf = (fade: unknown): number | undefined => {
-      const media = coerceWallpaper({
+    const fadeOf = (fade: unknown) => {
+      const wallpaper = coerceWallpaper({
         kind: 'image',
         id: 'wp.jpg',
         fit: 'cover',
@@ -105,7 +105,7 @@ describe('appearance model - wallpaper media', () => {
         y: 0.5,
         fade,
       });
-      return media !== undefined && media.kind !== 'color' ? media.fade : undefined;
+      return wallpaper?.kind === 'image' ? wallpaper.fade : undefined;
     };
     expect(fadeOf(0)).toBe(0);
     expect(fadeOf(100)).toBe(100);

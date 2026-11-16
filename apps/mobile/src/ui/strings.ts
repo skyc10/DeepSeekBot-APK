@@ -3587,7 +3587,7 @@ const zh: typeof en = {
     credentialPlaceholder: '粘贴凭据 JSON',
     reveal: '显示凭据',
     hide: '隐藏凭据',
-    invalid: (reason: 'json' | 'shape' | 'large') =>
+    invalid: (reason: 'json' | 'shape' | 'large'): string =>
       reason === 'json'
         ? '请输入合法的 JSON。'
         : reason === 'large'
@@ -3605,8 +3605,10 @@ const zh: typeof en = {
     loadFailed: '无法加载 IM 应用。',
     empty: '这台主机没有可授权的 IM 应用。',
     reload: '重新加载',
-    platform: (platform: 'feishu' | 'weixin') => (platform === 'feishu' ? '飞书 / Lark' : '微信'),
-    kind: (kind: 'credentials' | 'qr') => (kind === 'credentials' ? '填写应用凭据' : '扫码授权'),
+    platform: (platform: 'feishu' | 'weixin'): string =>
+      platform === 'feishu' ? '飞书 / Lark' : '微信',
+    kind: (kind: 'credentials' | 'qr'): string =>
+      kind === 'credentials' ? '填写应用凭据' : '扫码授权',
     state: (state: string) => `状态：${state}`,
     qr: '授权二维码',
     appId: '应用 ID',

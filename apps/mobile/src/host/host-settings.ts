@@ -82,7 +82,7 @@ function removePath(root: Record<string, unknown>, path: readonly string[]): voi
     if (cursor === undefined) return;
   }
   const last = path[path.length - 1];
-  if (cursor === undefined || last === undefined) return;
+  if (last === undefined) return;
   delete cursor[last];
 }
 
