@@ -1,3 +1,5 @@
+import { useState } from 'react';
+
 import { useHostSession } from '../../host/host-session';
 import { SHEET_GROUP } from '../chat/sheet';
 import { Segmented } from '../primitives/segmented';
@@ -27,8 +29,7 @@ function isLanHost(host: string): boolean {
   const parts = host.split('.');
   if (parts.length !== 4 || parts.some((p) => !/^\d{1,3}$/u.test(p) || Number(p) > 255))
     return false;
-  const a = Number(parts[0]);
-  const b = Number(parts[1]);
+  const [a, b] = parts.map(Number);
   return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
 }
 
@@ -43,32 +44,37 @@ export function RouteSelector() {
     ? classifyRoute(currentPreference)
     : classifyRoute(currentRoute);
 
+  const [failed, setFailed] = useState(false);
   const handleChange = (kind: RouteKind) => {
     const target = routes.find((r) => classifyRoute(r) === kind) ?? routes[0];
-    if (target && client?.setRoutePreference) {
-      void client.setRoutePreference(target).catch(() => undefined);
-    }
+    const setter = client?.setRoutePreference;
+    if (target === undefined || setter === undefined) return;
+    // Keep the current selection on failure and surface a message instead of
+    // leaking an unhandled rejection from Segmented's void onChange.
+    void setter(target).then(
+      () => setFailed(false),
+      () => setFailed(true),
+    );
   };
 
   if (routes.length <= 1) return null;
 
   return (
     <SettingsFormItem>
-      <>
-        <Segmented
-          label={t.routeSelector.title}
-          options={[
-            { value: 'connect' as RouteKind, label: t.routeSelector.connect },
-            { value: 'tailscale' as RouteKind, label: t.routeSelector.tailscale },
-            { value: 'lan' as RouteKind, label: t.routeSelector.lan },
-          ]}
-          value={currentKind}
-          onChange={handleChange}
-        />
-        {client?.secretInputAllowed?.() === false ? null : (
-          <Notice tone="warning">{t.routeSelector.hint}</Notice>
-        )}
-      </>
+      <Segmented
+        label={t.routeSelector.title}
+        options={[
+          { value: 'connect' as RouteKind, label: t.routeSelector.connect },
+          { value: 'tailscale' as RouteKind, label: t.routeSelector.tailscale },
+          { value: 'lan' as RouteKind, label: t.routeSelector.lan },
+        ]}
+        value={currentKind}
+        onChange={handleChange}
+      />
+      {failed ? <Notice tone="danger">{t.routeSelector.failed}</Notice> : null}
+      {client?.secretInputAllowed?.() === false ? null : (
+        <Notice tone="warning">{t.routeSelector.hint}</Notice>
+      )}
     </SettingsFormItem>
   );
 }

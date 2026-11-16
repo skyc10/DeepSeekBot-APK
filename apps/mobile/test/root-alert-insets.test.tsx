@@ -51,6 +51,10 @@ vi.mock('../src/ui/theme', () => ({ useTheme: () => ({ background: '', ink: '' }
 vi.mock('../src/ui/design/theme', () => ({
   useDesignTheme: () => ({ scheme: 'dark', overlay: { fill: '' } }),
 }));
+vi.mock('../src/ui/app-wallpaper', () => ({
+  AppWallpaper: () => null,
+  useWallpaperActive: () => false,
+}));
 vi.mock('../src/ui/shell/host-drawer', () => ({
   HostDrawer: () => null,
   WorkspaceButton: () => null,

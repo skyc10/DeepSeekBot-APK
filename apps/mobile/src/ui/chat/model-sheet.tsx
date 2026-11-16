@@ -1,4 +1,4 @@
-import { useState, type ComponentType } from 'react';
+import { useEffect, useState, useSyncExternalStore, type ComponentType } from 'react';
 import { SectionList } from 'react-native';
 
 import {
@@ -15,6 +15,14 @@ import {
   SettingsRow,
   type SettingsRowControl,
 } from '../primitives/settings-row';
+import {
+  classifyModelList,
+  getModelSourceSnapshot,
+  modelSourceText,
+  recordModelSource,
+  subscribeModelSource,
+} from '../../host/model-settings';
+import { Text } from '../primitives/text';
 import { useStrings, t } from '../strings';
 import {
   Sheet,
@@ -57,8 +65,13 @@ export function ModelSheet({
   onClose(): void;
 }) {
   const t = useStrings();
+  const source = useSyncExternalStore(subscribeModelSource, getModelSourceSnapshot);
   const [busy, setBusy] = useState<string>();
   const [error, setError] = useState<string>();
+  const modelCount = model.status === 'ready' ? model.value.models.length : 0;
+  useEffect(() => {
+    if (model.status === 'ready') recordModelSource('catalog.models', modelCount);
+  }, [model.status, modelCount]);
   const close = () => {
     if (busy !== undefined) return;
     setError(undefined);
@@ -88,6 +101,8 @@ export function ModelSheet({
     body = <SheetFailed message={t.modelFailed} onRetry={onRetry} />;
   else {
     const value = model.value;
+    const listState = classifyModelList(value.models.length, false);
+    const lastSource = source[source.length - 1];
     const current = currentModel(value).route;
     const sections = [
       ...(value.presets.length === 0
@@ -157,6 +172,21 @@ export function ModelSheet({
         stickySectionHeadersEnabled={false}
         ListHeaderComponent={
           <>
+            <Text variant="meta" tone="muted" testID="model-catalog-debug">
+              {t.modelSettings.catalogDebug(
+                value.models.length,
+                modelSourceText(lastSource),
+                model.status === 'failed' ? t.modelFailed : '',
+              )}
+            </Text>
+            {listState === 'empty' || listState === 'single' ? (
+              <SheetCallout tone="warning">
+                {listState === 'empty' ? t.modelSettings.noModels : t.modelSettings.onlyDefault}
+                {modelSourceText(lastSource) === ''
+                  ? ''
+                  : `\n${t.modelSettings.listSource(modelSourceText(lastSource))}`}
+              </SheetCallout>
+            ) : null}
             {value.repair !== undefined ? (
               <SheetCallout tone="warning">{t.modelRepair}</SheetCallout>
             ) : null}

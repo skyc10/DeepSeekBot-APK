@@ -42,6 +42,15 @@ export default function SettingsScreen() {
         messageDisplay={<MessageDisplaySetting />}
         sendJump={<SendJumpSetting />}
         activityCount={<ActivityCountLink />}
+        theme={
+          <SettingsRow
+            on={SHEET_GROUP}
+            title={t.themeSettings.title}
+            icon="appearance"
+            disclosure
+            onPress={() => router.push('/settings/appearance')}
+          />
+        }
         hapticFeedback={<HapticFeedbackSetting />}
         deliveryReceipts={<DeliveryReceiptSetting />}
         chatBackground={
@@ -62,6 +71,10 @@ export default function SettingsScreen() {
           onAppIcon: () => router.push('/settings/app-icon'),
           onNotifications: () => router.push('/settings/notifications'),
           onStorage: () => router.push('/settings/storage'),
+          onHostSettings: () => router.push('/settings/host-settings'),
+          onCredentials: () => router.push('/settings/credentials'),
+          onCloudConnections: () => router.push('/settings/cloud-connections'),
+          onAppSetup: () => router.push('/settings/app-setup'),
           onModels: () => router.push('/settings/models'),
           onCopyVersion: copyMessage,
         }}

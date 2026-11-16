@@ -1,5 +1,13 @@
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
-import { useCallback, useMemo, useRef, useState, type ReactNode } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type ReactNode,
+} from 'react';
 import { FlatList, Keyboard, View } from 'react-native';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 
@@ -11,8 +19,13 @@ import {
   modelRoutes,
   modelScopeKey,
   modelSettingsResource,
+  modelSourceText,
+  classifyModelList,
+  getModelSourceSnapshot,
+  recordModelSource,
   saveModelPreset,
   searchModels,
+  subscribeModelSource,
   setModelRoute,
   toggleAssignmentModel,
   type ModelField,
@@ -25,6 +38,7 @@ import { renderKeyboardFormScroll } from '../primitives/keyboard-form';
 import { SearchField } from '../primitives/search-field';
 import { SettingsGroupItem, SettingsRow, SettingsSection } from '../primitives/settings-row';
 import { SheetPage } from '../primitives/sheet-page';
+import { Text } from '../primitives/text';
 import { TextField } from '../primitives/text-field';
 import { useStrings, t } from '../strings';
 import { SHEET_GROUP, SheetCallout, SheetFailed, SheetLoading, SheetNote } from './sheet';
@@ -124,10 +138,15 @@ function ModelsView({
   const t = useStrings();
   const router = useRouter();
   const models = useModels(client, scope);
+  const source = useSyncExternalStore(subscribeModelSource, getModelSourceSnapshot);
   const [query, setQuery] = useState('');
   const [name, setName] = useState<string>();
   const [saved, setSaved] = useState(false);
   const value = models.value;
+  const modelCount = value?.models.length ?? 0;
+  useEffect(() => {
+    recordModelSource('catalog.models', modelCount);
+  }, [modelCount, modelScopeKey(scope)]);
   const openPicker = (field: ModelField) => {
     if (scope.kind === 'bot')
       router.push({ pathname: '/bot/[slug]/model-picker', params: { slug: scope.slug, field } });
@@ -229,6 +248,22 @@ function ModelsView({
       );
     }
     const entries = searchModels(value.models, query);
+    const listState = classifyModelList(value.models.length, models.error !== undefined);
+    const lastSource = source[source.length - 1];
+    const thinList =
+      listState === 'empty' || listState === 'single' ? (
+        <View style={{ gap: space.x3, paddingHorizontal: space.x5 }}>
+          <SheetCallout tone="warning">
+            {listState === 'empty'
+              ? t.modelSettings.noModels
+              : t.modelSettings.onlyDefault}
+            {modelSourceText(lastSource) === ''
+              ? ''
+              : `\n${t.modelSettings.listSource(modelSourceText(lastSource))}`}
+          </SheetCallout>
+          <Button label={t.retry} onPress={models.refresh} disabled={models.busy} />
+        </View>
+      ) : null;
     return frame(
       <>
         <SearchField
@@ -237,7 +272,15 @@ function ModelsView({
           placeholder={t.modelSettings.search}
           onChangeText={setQuery}
         />
+        <Text variant="meta" tone="muted" testID="model-catalog-debug">
+          {t.modelSettings.catalogDebug(
+            value.models.length,
+            modelSourceText(lastSource),
+            models.error ?? '',
+          )}
+        </Text>
         {banner}
+        {thinList}
         {models.busy ? <LoadingIndicator /> : null}
         <FlatList
           style={{ flex: 1 }}
