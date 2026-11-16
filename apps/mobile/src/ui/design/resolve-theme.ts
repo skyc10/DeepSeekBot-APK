@@ -158,7 +158,7 @@ export function resolveTheme(
   const scheme =
     appearance.scheme === undefined || appearance.scheme === 'system' ? system : appearance.scheme;
   const preset = appearance.preset ?? 'classic-blue';
-  const primary = appearance.primary ?? APPEARANCE_PRIMARY[preset][scheme];
+  const primary = appearance.accent ?? appearance.primary ?? APPEARANCE_PRIMARY[preset][scheme];
   const color = withAccent({ ...palette[scheme] }, primary);
   const material: { header: Material; body: Material } = {
     header: { color: color.surface, opacity: 80, blur: 24 },
