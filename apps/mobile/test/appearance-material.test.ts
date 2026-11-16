@@ -28,8 +28,6 @@ describe('resolveTheme - preset drives primary', () => {
   });
 
   it('an invalid accent falls back to the preset primary, not the palette accent', () => {
-    // Regression: an invalid accent used to reach withAccent, which returned palette.accent
-    // (#3e70db) instead of the preset primary (#4176e6).
     expect(resolveTheme('light', { accent: 'red' }).color.accent).toBe(
       APPEARANCE_PRIMARY['classic-blue'].light,
     );
