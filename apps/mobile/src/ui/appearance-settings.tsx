@@ -20,14 +20,10 @@ import { useStrings } from './strings';
 
 const STYLES: readonly ThemeStyle[] = ['default', 'glass', 'image'];
 
-/** Native wallpaper operations injected by the route, so this body stays free of native IO. */
 export type WallpaperPorts = {
   pick(): Promise<WallpaperMedia | undefined>;
 };
 
-/** Theme settings screen body: preset selection per scheme, surface style, and the glass
- * toggle. Every change goes straight through the appearance store, so the whole app updates
- * live via useDesignTheme — this screen needs no separate preview state. */
 export function AppearanceSettingsContent({
   snapshot,
   wallpaper,
@@ -91,7 +87,6 @@ export function AppearanceSettingsContent({
           control={{
             kind: 'switch',
             value: doc.materialEnabled,
-            // Atomic: one revision bump / one disk write; also moves default -> glass on opt-in.
             onChange: (enabled) => appearanceStore.setGlass(enabled),
             disabled: !snapshot.loaded,
             testID: 'theme-glass-toggle',

@@ -12,7 +12,6 @@ import { layers, tint, type Layer, type LayerName } from './layers';
 import { palette } from './palette.generated';
 import { mono, touch, typeScale, weight, type PlatformOS } from './tokens';
 
-// Keep the historical re-exports from this module so existing consumers do not break.
 export type { AppearanceDocument, Material, ThemePreset, ThemeStyle } from '../appearance-model';
 
 export const APPEARANCE_PRIMARY: Record<ThemePreset, { light: string; dark: string }> = {
@@ -23,8 +22,6 @@ export const APPEARANCE_PRIMARY: Record<ThemePreset, { light: string; dark: stri
 };
 export type ColorScheme = 'light' | 'dark';
 
-/** Resolved appearance inputs. `scheme`/`accent` are the legacy host-controlled fields;
- * the rest come from the persisted appearance document and drive preset + glass surfaces. */
 export type Appearance = {
   scheme?: 'system' | ColorScheme;
   accent?: string;
@@ -38,7 +35,6 @@ export type Appearance = {
 export type DesignTheme = {
   scheme: ColorScheme;
   style: ThemeStyle;
-  /** True when glass/material surfaces are active for the current platform. */
   glass: boolean;
   fontScale: number;
   largeText: boolean;
@@ -141,10 +137,6 @@ export function headerBand(scheme: ColorScheme, color: Record<ColorRole, string>
   };
 }
 
-/** Glass surface recipe per platform. Android uses a static frosted fill (方案 A): a mostly
- * opaque tint with a modest blur token, paint-able without a runtime blur pass. iOS uses the
- * platform Liquid Glass material: lower opacity and a higher blur token so the native surface
- * can let the wallpaper through. Defaults to the legacy solid surfaces when glass is off. */
 type MaterialRecipe = { opacity: number; blur: number };
 const SOLID_MATERIAL: { header: MaterialRecipe; body: MaterialRecipe } = {
   header: { opacity: 80, blur: 24 },
@@ -173,8 +165,6 @@ function applyMaterial(
   };
 }
 
-/** Resolve surface materials. When `glass` is false the legacy solid recipe is preserved
- * byte-for-byte, so existing screens and tests see no change. */
 export function resolveMaterial(
   color: Record<ColorRole, string>,
   glass: boolean,
@@ -196,11 +186,6 @@ export function resolveTheme(
   const scheme =
     appearance.scheme === undefined || appearance.scheme === 'system' ? system : appearance.scheme;
   const preset = appearance.preset ?? 'classic-blue';
-  // Precedence matches the integration branch: a caller-supplied accent (AccentProvider / host
-  // look) wins, then an explicit primary, then the preset default. Historically this branch
-  // ignored `accent` entirely, so resolveTheme('light',{accent:'#FFD60A'}) never painted it —
-  // design-tokens' "custom accent" case caught it, and the integration branch already fixed it.
-  // withAccent rejects non-hex values, so an invalid accent still falls back to the preset color.
   const primary = appearance.accent ?? appearance.primary ?? APPEARANCE_PRIMARY[preset][scheme];
   const color = withAccent({ ...palette[scheme] }, primary);
   const style = appearance.style ?? 'default';

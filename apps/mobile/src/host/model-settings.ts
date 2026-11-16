@@ -298,7 +298,6 @@ export async function saveModelPreset(
   return presetAnswer.id;
 }
 
-/** Which projection actually supplied a model list, for on-device diagnosis. */
 export type ModelSource = 'catalog.models' | 'plan.default';
 export type ModelSourceRecord = { source: ModelSource; count: number; at: number };
 
@@ -324,7 +323,6 @@ export function recordModelSource(source: ModelSource, count: number): void {
 
 export type ModelListState = 'ok' | 'empty' | 'single' | 'failed';
 
-/** A failed catalog read must never masquerade as a small but valid list. */
 export function classifyModelList(count: number, failed = false): ModelListState {
   if (failed) return 'failed';
   return count === 0 ? 'empty' : count === 1 ? 'single' : 'ok';

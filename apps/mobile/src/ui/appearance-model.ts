@@ -13,9 +13,6 @@ export type Preference = 'system' | 'light' | 'dark';
 export type Scheme = 'light' | 'dark';
 export type Material = { color: string; opacity: number; blur: number };
 
-/** An image or video wallpaper stored on-device. A video keeps an image poster so a still
- * frame is always paint-able. `fade` is the theme-canvas overlay strength, 0..100 (matching
- * the chat background model). */
 export type WallpaperMedia =
   | { kind: 'color'; color: string }
   | { kind: 'image'; id: string; fit: 'cover' | 'contain'; x: number; y: number; fade: number }
@@ -42,8 +39,6 @@ export type AppearanceDocument = {
   style: ThemeStyle;
   modes: { light: ModeConfig; dark: ModeConfig };
   wallpaper?: WallpaperMedia;
-  /** Glass surfaces are opt-in and independent of `style`, so an image wallpaper can also
-   * use them. Android synthesizes a static frosted fill; iOS uses native Liquid Glass. */
   materialEnabled: boolean;
 };
 
@@ -137,8 +132,6 @@ export function coerceWallpaper(value: unknown): WallpaperMedia | undefined {
   return undefined;
 }
 
-/** Normalize a persisted document field-by-field so a newer writer never bricks an older
- * client. Returns undefined only for a non-object, an unsupported version, or a bad revision. */
 export function coerceAppearanceDocument(value: unknown): AppearanceDocument | undefined {
   if (!isObject(value) || value['version'] !== APPEARANCE_VERSION) return undefined;
   const revision = value['revision'];
@@ -163,8 +156,6 @@ export function coerceAppearanceDocument(value: unknown): AppearanceDocument | u
   };
 }
 
-/** Parse persisted JSON. Throws on invalid JSON or an unsupported shape; every other field is
- * normalized with safe fallbacks. */
 export function parseAppearanceDocument(raw: string): AppearanceDocument {
   let value: unknown;
   try {
@@ -177,14 +168,11 @@ export function parseAppearanceDocument(raw: string): AppearanceDocument {
   return doc;
 }
 
-/** Effective mode for a system scheme. */
 export function modeFor(doc: AppearanceDocument, system: Scheme): ModeConfig {
   const scheme: Scheme = doc.preference === 'system' ? system : doc.preference;
   return doc.modes[scheme];
 }
 
-/** The paint-able image id for a wallpaper. Videos use their poster on mobile platforms
- * (no native video playback), so callers always render a single still source. */
 export function paintSource(wallpaper: WallpaperMedia | undefined): string | undefined {
   if (wallpaper === undefined || wallpaper.kind === 'color') return undefined;
   if (wallpaper.kind === 'image') return wallpaper.id;
@@ -192,9 +180,7 @@ export function paintSource(wallpaper: WallpaperMedia | undefined): string | und
 }
 
 export type ResolvedWallpaper = {
-  /** Resolved file URI to paint, from the injected `imageUri` mapper. */
   uri: string;
-  /** `video` means the still frame came from a video wallpaper (poster or first frame). */
   kind: 'image' | 'video';
   fit: 'cover' | 'contain';
   x: number;
@@ -202,12 +188,6 @@ export type ResolvedWallpaper = {
   fade: number;
 };
 
-/** Pure wallpaper source resolution. Given an appearance document and a function that maps a
- * stored media id to a file URI, decide exactly what the full-screen background should paint.
- * Covers every persisted shape: no/cleared wallpaper -> undefined; solid color -> undefined
- * (the theme canvas paints it); image -> its own URI; video with a poster -> the poster URI;
- * video without a poster -> the video id (a still frame / bundled thumbnail). No native calls,
- * so it is fully unit-testable; native rendering stays in the app-wallpaper component. */
 export function resolveWallpaperSource(
   doc: AppearanceDocument,
   imageUri: (id: string) => string,
@@ -225,13 +205,11 @@ export function resolveWallpaperSource(
   };
 }
 
-/** Whether glass surfaces should be synthesized for a platform. */
 export function usesGlass(doc: AppearanceDocument, os: PlatformOS): boolean {
   if (!doc.materialEnabled || (doc.style !== 'glass' && doc.style !== 'image')) return false;
   return os === 'ios' || os === 'android';
 }
 
-/** Immutable edit helpers. Each write bumps the revision exactly once. */
 export function setPreference(doc: AppearanceDocument, preference: Preference): AppearanceDocument {
   return { ...doc, preference, revision: doc.revision + 1 };
 }
@@ -244,9 +222,6 @@ export function setMaterialEnabled(doc: AppearanceDocument, enabled: boolean): A
   return { ...doc, materialEnabled: enabled, revision: doc.revision + 1 };
 }
 
-/** Opt glass on/off in one atomic edit. Turning on from the default style also moves the style
- * to `glass` so the material actually resolves; turning off restores the default style. One
- * revision bump and one disk write, so a failed write cannot leave material/style out of sync. */
 export function setGlass(doc: AppearanceDocument, enabled: boolean): AppearanceDocument {
   const style: ThemeStyle = enabled
     ? doc.style === 'default'
@@ -274,7 +249,6 @@ export function setWallpaper(
 ): AppearanceDocument {
   const next: AppearanceDocument = { ...doc, revision: doc.revision + 1 };
   if (wallpaper === undefined) {
-    // Explicitly remove the key so "clear wallpaper" actually clears it on disk.
     delete next.wallpaper;
   } else {
     next.wallpaper = wallpaper;

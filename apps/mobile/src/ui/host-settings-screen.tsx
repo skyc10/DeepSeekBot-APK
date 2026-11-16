@@ -18,7 +18,6 @@ import { Text } from './primitives/text';
 import { TextField } from './primitives/text-field';
 import { useStrings } from './strings';
 
-/** The host operations a settings screen needs, injected so the view stays testable. */
 export interface HostSettingsPort {
   describe(): Promise<SettingsDescribe>;
   save(ns: string, patch: Record<string, unknown>, revision: number): Promise<SettingsSaveResult>;
@@ -56,9 +55,11 @@ export function HostSettingsView({ port, onClose }: { port: HostSettingsPort; on
     }
   }, [port]);
 
-  useEffect(() => {
+  const didInitialLoad = useRef(false);
+  if (!didInitialLoad.current) {
+    didInitialLoad.current = true;
     void reload();
-  }, [reload]);
+  }
 
   const namespace =
     load.status === 'ready' && selected !== undefined
@@ -135,8 +136,6 @@ export function HostSettingsView({ port, onClose }: { port: HostSettingsPort; on
     }
   };
 
-  // A conflict means our revision fence was stale. Reload the current value and
-  // return to the list so an edited draft cannot silently clobber a peer write.
   const reloadAfterConflict = async () => {
     const describe = await port.describe().catch(() => undefined);
     if (describe !== undefined) {

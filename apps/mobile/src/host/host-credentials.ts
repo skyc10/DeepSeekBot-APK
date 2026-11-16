@@ -1,10 +1,6 @@
 import { MethodRefused } from './client';
 import type { HostClient } from './host-settings';
 
-/**
- * Client-safe view of one credential. The full secret is never returned by the
- * Host: only these configuration facts and an optional provider-masked preview.
- */
 export type CredentialInfo = {
   configured: boolean;
   source?: string;
@@ -19,7 +15,6 @@ export type CredentialWriteResult =
   | { kind: 'refused' }
   | { kind: 'error' };
 
-/** A credential reference is a POSIX-style environment-variable name. */
 const REF = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 export function validCredentialRef(ref: string): boolean {
@@ -63,7 +58,6 @@ export async function describeCredentials(
   return result;
 }
 
-/** Never echo a submitted secret back through a Host error message. */
 function redact(message: string, secrets: readonly string[]): string {
   let result = message;
   for (const secret of secrets) {
@@ -85,7 +79,6 @@ function writeFailure(error: unknown, secrets: readonly string[] = []): Credenti
   return { kind: 'error' };
 }
 
-/** Write a secret value. The value is sent once and never stored or read back. */
 export async function setCredential(
   client: HostClient,
   ref: string,
@@ -99,7 +92,6 @@ export async function setCredential(
   }
 }
 
-/** Remove a stored credential. Takes a reference, never a value. */
 export async function unsetCredential(
   client: HostClient,
   ref: string,

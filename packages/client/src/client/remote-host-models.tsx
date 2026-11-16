@@ -145,9 +145,6 @@ function Models({
   const [value, setValue] = useState<ModelSettingsState>();
   const source = useSyncExternalStore(subscribeModelSource, getModelSourceSnapshot);
   const modelCount = value?.models.length ?? 0;
-  useEffect(() => {
-    recordModelSource('catalog.models', modelCount);
-  }, [modelCount, modelScopeKey(scope)]);
   const [error, setError] = useState<ReturnType<typeof settingsFailure>>();
   const [busy, setBusy] = useState(false);
   const [name, setName] = useState<string>();

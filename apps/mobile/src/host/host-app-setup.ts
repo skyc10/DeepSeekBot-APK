@@ -64,7 +64,6 @@ const STATES: string[] = [
   'failed',
 ];
 
-/** Project a raw Provider attempt to the minimal, validated client view. */
 export function projectAttempt(value: unknown): AppSetupAttempt | undefined {
   const raw = record(value);
   if (
@@ -113,7 +112,6 @@ export function projectAttempt(value: unknown): AppSetupAttempt | undefined {
   return attempt;
 }
 
-/** Discover qualified IM app setup descriptors from the messaging projection. */
 export async function listAppSetups(client: HostClient): Promise<AppSetupsResult> {
   try {
     const value = record(await client.call<unknown>('messagingApps', {}));
@@ -180,7 +178,6 @@ export function cancelAppSetup(client: HostClient, attemptId: string): Promise<A
   return operate(client, 'setup.cancel', { attemptId });
 }
 
-/** Feishu credentials enter here only; appSecret is sent once and never read back. */
 export function submitAppCredentials(
   client: HostClient,
   attemptId: string,
@@ -191,7 +188,6 @@ export function submitAppCredentials(
   return operate(client, 'setup.credentials', { attemptId, appId, appSecret, domain });
 }
 
-/** WeChat QR verification code enters here only. */
 export function verifyAppSetup(
   client: HostClient,
   attemptId: string,

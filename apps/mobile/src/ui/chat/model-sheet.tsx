@@ -69,9 +69,6 @@ export function ModelSheet({
   const [busy, setBusy] = useState<string>();
   const [error, setError] = useState<string>();
   const modelCount = model.status === 'ready' ? model.value.models.length : 0;
-  useEffect(() => {
-    if (model.status === 'ready') recordModelSource('catalog.models', modelCount);
-  }, [model.status, modelCount]);
   const close = () => {
     if (busy !== undefined) return;
     setError(undefined);

@@ -138,8 +138,6 @@ function RootNavigator() {
                     headerShadowVisible: false,
                     headerBackButtonDisplayMode: 'minimal',
                     headerBackTitle: t.back,
-                    // Let the app-wide wallpaper show through when one is active; otherwise the
-                    // solid theme background keeps the original, fully opaque behavior.
                     contentStyle: {
                       backgroundColor: wallpaperActive ? 'transparent' : theme.background,
                     },

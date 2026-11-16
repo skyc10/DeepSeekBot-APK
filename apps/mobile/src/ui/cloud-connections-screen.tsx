@@ -65,9 +65,11 @@ export function CloudConnectionsView({
     }
   }, [port]);
 
-  useEffect(() => {
+  const didInitialLoad = useRef(false);
+  if (!didInitialLoad.current) {
+    didInitialLoad.current = true;
     void reload();
-  }, [reload]);
+  }
 
   const openImport = (target: CloudConnectionView | undefined) => {
     setEditing(target);
@@ -91,7 +93,6 @@ export function CloudConnectionsView({
     setMessage('');
     try {
       const result = await port.import(parsed.credential);
-      // The credential (including its secret) is dropped from memory here.
       setText('');
       setRevealed(false);
       if (result.kind === 'ok') {

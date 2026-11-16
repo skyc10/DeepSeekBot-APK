@@ -82,14 +82,6 @@ function removePath(root: Record<string, unknown>, path: readonly string[]): voi
   delete cursor[path[path.length - 1]];
 }
 
-/**
- * Strip credential-managed paths from a namespace value.
- *
- * `settings/describe` redacts secret values to `{ set }` markers and the native
- * `credentials/set` route is the only writer for them. Removing those paths
- * here keeps them out of both the editor and the `settings/update` patch, so a
- * generic settings write can never echo or overwrite a secret.
- */
 export function omitSecretPaths(
   value: Record<string, unknown>,
   secrets: readonly { path: readonly string[]; set: boolean }[] | undefined,
@@ -108,13 +100,6 @@ export type SettingsSaveResult =
   | { kind: 'refused' }
   | { kind: 'error' };
 
-/**
- * Write a namespace value with an optimistic-revision fence.
- *
- * A `settings/conflict` refusal is surfaced with the expected and current
- * revisions so the UI can offer a reload instead of silently overwriting a
- * concurrent change.
- */
 export async function saveSettingsValue(
   client: HostClient,
   ns: string,

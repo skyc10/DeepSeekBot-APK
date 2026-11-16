@@ -37,10 +37,6 @@ export function appearanceFile() {
   return new File(Paths.document, FILE_NAME);
 }
 
-/** Persist a document. When `expectedRevision` is provided the on-disk document must carry
- * that revision, otherwise the write is refused with `appearance-revision-conflict` — the
- * same optimistic-concurrency contract the host uses for settings/update. The write is
- * verified by reading the exact bytes back, matching the chat-background storage policy. */
 export function writeAppearanceDocument(
   doc: AppearanceDocument,
   expectedRevision?: number,

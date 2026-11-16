@@ -82,9 +82,11 @@ export function AppSetupView({ port, onClose }: { port: AppSetupPort; onClose():
     }
   }, [port]);
 
-  useEffect(() => {
+  const didInitialLoad = useRef(false);
+  if (!didInitialLoad.current) {
+    didInitialLoad.current = true;
     void reload();
-  }, [reload]);
+  }
 
   const apply = (result: AppSetupResult): boolean => {
     if (result.kind === 'ok') {
@@ -104,8 +106,6 @@ export function AppSetupView({ port, onClose }: { port: AppSetupPort; onClose():
     setBusy(true);
     try {
       const result = await work();
-      // Secrets are dropped from memory after the write settles, whatever the
-      // outcome. A rejected attempt must not leave the value on screen.
       if (clearSecrets) {
         setAppSecret('');
         setVerifyCode('');

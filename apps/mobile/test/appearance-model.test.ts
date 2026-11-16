@@ -129,7 +129,6 @@ describe('appearance model - wallpaper media', () => {
 });
 
 describe('resolveWallpaperSource - pure uri selection', () => {
-  // A fake id->uri mapper; no native module involved.
   const uri = (id: string) => `file://wallpapers/${id}`;
   const base = defaultAppearanceDocument();
 
@@ -288,14 +287,12 @@ describe('appearance model - edits and resolution', () => {
     expect(on.materialEnabled).toBe(true);
     expect(on.style).toBe('glass');
 
-    // Keeping a non-default style (image) when opting in.
     const image = setStyle(base, 'image');
     const onImage = setGlass(image, true);
     expect(onImage.style).toBe('image');
     expect(onImage.materialEnabled).toBe(true);
     expect(onImage.revision).toBe(image.revision + 1);
 
-    // Opting out restores the default style in one edit.
     const off = setGlass(onImage, false);
     expect(off.revision).toBe(onImage.revision + 1);
     expect(off.materialEnabled).toBe(false);

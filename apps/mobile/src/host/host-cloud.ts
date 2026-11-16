@@ -40,7 +40,6 @@ const hasControl = (text: string) =>
 
 const MOBILE_REDIRECT_URI = 'ai.botharness.deepseekbot.dev:/oauth2redirect';
 
-/** Mirror the Host's instance-config shape so bad pastes fail before the write. */
 function validConfig(value: unknown): boolean {
   const config = record(value);
   if (!config) return false;
@@ -164,7 +163,6 @@ export async function listCloudConnections(client: HostClient): Promise<CloudRes
   }
 }
 
-/** Import a credential; the Host makes the imported connection active. */
 export async function importCloudCredential(
   client: HostClient,
   credential: Record<string, unknown>,
@@ -186,10 +184,6 @@ export type CredentialText =
 
 const MAX_CREDENTIAL_TEXT = 20_000;
 
-/**
- * Parse a pasted Cloud Agent credential without ever echoing its secret.
- * Mirrors the Host's shape check so a malformed paste fails before the write.
- */
 export function parseCredentialText(text: string): CredentialText {
   if (text.length > MAX_CREDENTIAL_TEXT) return { kind: 'invalid', reason: 'large' };
   let value: unknown;

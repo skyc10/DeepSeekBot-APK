@@ -59,9 +59,11 @@ export function CredentialsView({ port, onClose }: { port: CredentialsPort; onCl
     }
   }, [port, ref, refValid]);
 
-  useEffect(() => {
+  const didInitialLoad = useRef(false);
+  if (!didInitialLoad.current) {
+    didInitialLoad.current = true;
     void refresh();
-  }, [refresh]);
+  }
 
   const save = async () => {
     if (!refValid || value.length === 0 || busy.current) return;
@@ -70,8 +72,6 @@ export function CredentialsView({ port, onClose }: { port: CredentialsPort; onCl
     setMessage('');
     try {
       const result = await port.set(ref, value);
-      // Clear the secret from memory as soon as the write settles. It is never
-      // rendered back, logged or persisted by this screen.
       setValue('');
       setRevealed(false);
       if (result.kind === 'saved') {

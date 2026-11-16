@@ -2,8 +2,6 @@ import { useSyncExternalStore } from 'react';
 
 import { appearanceStore, type AppearanceSnapshot } from './appearance-store';
 
-/** Subscribe to the process-wide appearance store. Restoration into this store happens once,
- * at startup, in native-interface-preferences (the app's native-preferences restore point). */
 export function useAppearance(): AppearanceSnapshot {
   return useSyncExternalStore(
     appearanceStore.subscribe,

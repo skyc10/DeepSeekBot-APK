@@ -6,18 +6,11 @@ import { useDesignTheme } from './design/theme';
 import { useAppearance } from './native-appearance';
 import { wallpaperMediaUri } from '../host/native-app-wallpaper';
 
-/** True when a paintable wallpaper (image or video) is active. Subscribes to the store so the
- * navigator can switch its content background to transparent the moment a wallpaper is chosen
- * (or back to the solid theme color when it is cleared), with no remount. */
 export function useWallpaperActive(): boolean {
   const kind = useAppearance().document.wallpaper?.kind;
   return kind === 'image' || kind === 'video';
 }
 
-/** Full-app wallpaper layer. Mounted behind the navigator so it paints across the whole app.
- * Subscribes to the appearance store, so choosing/changing/clearing a wallpaper and switching
- * light/dark takes effect immediately without remounting. Videos render their poster still
- * frame on mobile (no native video playback); the data model keeps the video id for later. */
 export function AppWallpaper() {
   const { document } = useAppearance();
   const theme = useDesignTheme();

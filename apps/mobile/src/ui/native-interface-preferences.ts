@@ -34,8 +34,6 @@ void interfacePreferences.restore({
   },
 });
 
-// Restore the appearance document into the same store the design theme subscribes to. This
-// module is the app's native-preferences restoration point and is already loaded at startup.
 void appearanceStore.restore({
   async read() {
     try {

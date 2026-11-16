@@ -49,8 +49,6 @@ export function RouteSelector() {
     const target = routes.find((r) => classifyRoute(r) === kind) ?? routes[0];
     const setter = client?.setRoutePreference;
     if (target === undefined || setter === undefined) return;
-    // Keep the current selection on failure and surface a message instead of
-    // leaking an unhandled rejection from Segmented's void onChange.
     void setter(target).then(
       () => setFailed(false),
       () => setFailed(true),

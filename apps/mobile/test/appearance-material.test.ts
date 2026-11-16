@@ -23,7 +23,6 @@ describe('resolveTheme - preset drives primary', () => {
   });
 
   it('a caller-supplied accent drives the primary when no primary is set (regression)', () => {
-    // design-tokens.test.ts "applies a custom accent" failed in v2 because accent was ignored.
     expect(resolveTheme('light', { accent: '#FFD60A' }).color.accent).toBe('#ffd60a');
     expect(resolveTheme('dark', { accent: '#5b2ecc' }).color.accent).toBe('#5b2ecc');
   });
@@ -74,7 +73,6 @@ describe('resolveTheme - glass materials', () => {
   it('uses a static frosted recipe on Android and a lighter Liquid Glass recipe on iOS', () => {
     const android = resolveTheme('light', { style: 'glass', materialEnabled: true }, 'android');
     const ios = resolveTheme('light', { style: 'glass', materialEnabled: true }, 'ios');
-    // Android static frosted stays closer to opaque with a smaller blur token.
     expect(android.material.header.opacity).toBeGreaterThan(ios.material.header.opacity);
     expect(android.material.header.blur).toBeLessThan(ios.material.header.blur);
     expect(android.material.body.blur).toBeGreaterThan(0);

@@ -2,9 +2,6 @@ import { Directory, File, Paths } from 'expo-file-system';
 import { ImageManipulator, SaveFormat, type ImageRef } from 'expo-image-manipulator';
 import * as ImagePicker from 'expo-image-picker';
 
-/** On-device wallpaper media storage. Shares the image budget conventions of chat backgrounds.
- * Videos keep a JPEG poster generated from the picker thumbnail; mobile renders only the poster
- * still frame (no native video playback dependency), while the data model retains the video id. */
 const root = () => new Directory(Paths.document, 'app-wallpaper');
 const mediaDir = () => new Directory(root(), 'media');
 const MAX_EDGE = 2048;
@@ -77,8 +74,6 @@ export type PickedWallpaper =
   | { kind: 'image'; uri: string; width: number; height: number }
   | { kind: 'video'; uri: string; thumbnail?: string };
 
-/** Open the photo library for an image or a video. Callers then import via importImage /
- * importVideo, keeping the expensive IO explicit and testable. */
 export async function pickWallpaper(): Promise<PickedWallpaper | undefined> {
   const result = await ImagePicker.launchImageLibraryAsync({
     mediaTypes: ['images', 'videos'],
@@ -106,7 +101,6 @@ export async function pickWallpaper(): Promise<PickedWallpaper | undefined> {
   return { kind: 'image', uri: asset.uri, width: asset.width!, height: asset.height! };
 }
 
-/** Import a picked image into storage; returns the stored media id. */
 export async function importWallpaperImage(source: {
   uri: string;
   width: number;
@@ -115,7 +109,6 @@ export async function importWallpaperImage(source: {
   return (await saveJpeg(source.uri, { width: source.width, height: source.height })).id;
 }
 
-/** Import a picked video plus its thumbnail poster. Returns both ids for the document. */
 export async function importWallpaperVideo(source: {
   uri: string;
   thumbnail?: string;

@@ -120,9 +120,6 @@ export function useDesignTheme(): DesignTheme {
   );
   const system: ColorScheme = useColorScheme() === 'dark' ? 'dark' : 'light';
   const effective = useMemo(() => {
-    // The scheme stays owned by interfacePreferences (and any explicit context override) to
-    // preserve the native color-scheme side effect and existing screens. The theme document's
-    // preference selects which light/dark mode config supplies the preset/material values.
     const schemePref = appearance.scheme ?? preferences.appearance;
     const resolvedScheme: ColorScheme =
       schemePref === 'system' || schemePref === undefined ? system : schemePref;
@@ -136,8 +133,6 @@ export function useDesignTheme(): DesignTheme {
       primary: mode.primary,
       materialEnabled: document.materialEnabled,
       materials: mode.materials,
-      // Explicit context fields (e.g. an accent injected by the Host, or a preview override)
-      // still win over the persisted document.
       ...appearance,
     };
   }, [appearance, preferences.appearance, document, system]);
