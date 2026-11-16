@@ -940,7 +940,7 @@ const en = {
     credentialPlaceholder: 'Paste the credential JSON',
     reveal: 'Show credential',
     hide: 'Hide credential',
-    invalid: (reason: 'json' | 'shape' | 'large') =>
+    invalid: (reason: 'json' | 'shape' | 'large'): string =>
       reason === 'json'
         ? 'Enter valid JSON.'
         : reason === 'large'
@@ -3587,7 +3587,7 @@ const zh: typeof en = {
     credentialPlaceholder: '粘贴凭据 JSON',
     reveal: '显示凭据',
     hide: '隐藏凭据',
-    invalid: (reason: 'json' | 'shape' | 'large') =>
+    invalid: (reason: 'json' | 'shape' | 'large'): string =>
       reason === 'json'
         ? '请输入合法的 JSON。'
         : reason === 'large'
