@@ -49,9 +49,7 @@ async function render(port: CloudConnectionsPort): Promise<HTMLElement> {
   host = document.createElement('div');
   document.body.append(host);
   root = createRoot(host);
-  await act(async () =>
-    root!.render(<CloudConnectionsView port={port} onClose={vi.fn()} />),
-  );
+  await act(async () => root!.render(<CloudConnectionsView port={port} onClose={vi.fn()} />));
   return host;
 }
 
@@ -103,7 +101,9 @@ const credential = {
 
 describe('Cloud connections screen', () => {
   it('lists connections and imports a credential to switch, clearing it afterwards', async () => {
-    const list = vi.fn(async () => ({ kind: 'ok', result: { connections: [connection] } }) as CloudResult);
+    const list = vi.fn(
+      async () => ({ kind: 'ok', result: { connections: [connection] } }) as CloudResult,
+    );
     const imported: CloudConnectionView = { ...connection, active: true };
     const importFn = vi.fn(
       async () => ({ kind: 'ok', result: { connections: [imported] } }) as CloudResult,
@@ -113,7 +113,9 @@ describe('Cloud connections screen', () => {
 
     expect(view.textContent).toContain('Work cloud');
     expect(view.textContent).toContain(t.cloudConnections.inactive);
-    await act(async () => button(view, `Work cloud, org_abc123 · ${t.cloudConnections.inactive}`).click());
+    await act(async () =>
+      button(view, `Work cloud, org_abc123 · ${t.cloudConnections.inactive}`).click(),
+    );
 
     const field = view.querySelector('textarea')!;
     await act(async () => type(field, JSON.stringify(credential)));

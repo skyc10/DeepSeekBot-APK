@@ -5,11 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const fixture = vi.hoisted(() => ({
   setRoutePreference: vi.fn((_route: string) => Promise.resolve()),
-  routes: [
-    'https://my-host.ts.net',
-    'http://192.168.1.10:8080',
-    'https://connect.example.com',
-  ],
+  routes: ['https://my-host.ts.net', 'http://192.168.1.10:8080', 'https://connect.example.com'],
 }));
 
 vi.mock('../src/host/host-session', () => ({

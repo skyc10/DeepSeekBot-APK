@@ -23,7 +23,10 @@ export interface HostSettingsPort {
   save(ns: string, patch: Record<string, unknown>, revision: number): Promise<SettingsSaveResult>;
 }
 
-type Load = { status: 'loading' } | { status: 'ready'; describe: SettingsDescribe } | { status: 'error' };
+type Load =
+  | { status: 'loading' }
+  | { status: 'ready'; describe: SettingsDescribe }
+  | { status: 'error' };
 type SaveState = 'idle' | 'saving' | 'saved' | 'conflict' | 'rejected' | 'refused' | 'error';
 
 function isObject(value: unknown): value is Record<string, unknown> {

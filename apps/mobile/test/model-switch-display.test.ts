@@ -11,7 +11,13 @@ import {
 import { FakeHost } from './fake-host';
 
 const models = [
-  { provider: 'deepseek', providerName: 'DeepSeek', model: 'flash', modelName: 'Flash', efforts: [] },
+  {
+    provider: 'deepseek',
+    providerName: 'DeepSeek',
+    model: 'flash',
+    modelName: 'Flash',
+    efforts: [],
+  },
   { provider: 'deepseek', providerName: 'DeepSeek', model: 'pro', modelName: 'Pro', efforts: [] },
   { provider: 'openai', providerName: 'OpenAI', model: 'gpt-4o', modelName: 'GPT-4o', efforts: [] },
 ];

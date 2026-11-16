@@ -4,10 +4,7 @@ import {
   pickWallpaper,
   type PickedWallpaper,
 } from '../../src/host/native-app-wallpaper';
-import {
-  AppearanceSettingsContent,
-  type WallpaperPorts,
-} from '../../src/ui/appearance-settings';
+import { AppearanceSettingsContent, type WallpaperPorts } from '../../src/ui/appearance-settings';
 import { useAppearance } from '../../src/ui/native-appearance';
 
 async function pickAsDocument() {
