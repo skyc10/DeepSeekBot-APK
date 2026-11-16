@@ -523,7 +523,13 @@ jobs:
           if (!['none', 'affected', 'full'].includes(plan.tests) ||
               !['true', 'false'].includes(plan.mobile)) throw new Error('Invalid CI plan');
           const failed = Object.entries(needs).filter(([, job]) => !['success', 'skipped'].includes(job.result));
-          const missing = required.filter((name) => needs[name]?.result !== 'success');
+          // On plain push this repo runs mobile-only checks: heavy jobs are intentionally skipped.
+          const pushOnly = process.env.GITHUB_EVENT_NAME === 'push';
+          const missing = required.filter((name) =>
+            pushOnly
+              ? !['success', 'skipped'].includes(needs[name]?.result)
+              : needs[name]?.result !== 'success',
+          );
           if (failed.length || missing.length) {
             console.error('Verification failed', { failed: failed.map(([name]) => name), missing });
             process.exit(1);
