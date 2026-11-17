@@ -266,23 +266,22 @@ function ModelsView({
           placeholder={t.modelSettings.search}
           onChangeText={setQuery}
         />
-        <Text variant="meta" tone="muted" testID="model-catalog-debug" numberOfLines={1} ellipsizeMode="tail">
+        <Text
+          variant="meta"
+          tone="muted"
+          testID="model-catalog-debug"
+          numberOfLines={1}
+          ellipsizeMode="tail"
+        >
           {`raw ${value?.rawModelCount ?? value?.models.length ?? 0} / parsed ${value?.models.length ?? 0} / entries ${entries.length} / owner ${value?.owner ? 'Y' : 'N'} / allowed ${typeof value?.allowed === 'number' ? value.allowed : '-'} | ${entries.map((e) => `${e.provider}/${e.model}`).join(', ')}`}
         </Text>
         {banner}
         {thinList}
         {models.busy ? <LoadingIndicator /> : null}
-        <FlatList
-          style={{ flex: 1, minHeight: 240 }}
-          data={entries}
-          keyExtractor={(item, index) => JSON.stringify([item.provider, item.model, index])}
-          keyboardShouldPersistTaps="handled"
-          keyboardDismissMode="on-drag"
-          ListHeaderComponent={
-            picker === 'allowed' ? <SheetNote>{t.modelSettings.allowedHint}</SheetNote> : undefined
-          }
-          ListEmptyComponent={<SheetNote>{t.modelSettings.noResults}</SheetNote>}
-          renderItem={({ item, index }) => {
+        {entries.length === 0 ? (
+          <SheetNote>{t.modelSettings.noResults}</SheetNote>
+        ) : (
+          entries.map((item, index) => {
             const selected =
               picker === 'allowed'
                 ? routes.assignmentModels.some((option) => sameModel(option, item))
@@ -291,6 +290,7 @@ function ModelsView({
             const required = picker === 'allowed' && sameModel(item, routes.assignmentDefault);
             return (
               <SettingsGroupItem
+                key={JSON.stringify([item.provider, item.model, index])}
                 first={index === 0}
                 last={index === entries.length - 1}
                 on={SHEET_GROUP}
@@ -331,8 +331,8 @@ function ModelsView({
                 />
               </SettingsGroupItem>
             );
-          }}
-        />
+          })
+        )}
       </>,
     );
   }
