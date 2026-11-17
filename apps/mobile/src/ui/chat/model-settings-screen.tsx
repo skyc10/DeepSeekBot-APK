@@ -266,7 +266,7 @@ function ModelsView({
           placeholder={t.modelSettings.search}
           onChangeText={setQuery}
         />
-        <Text variant="meta" tone="muted" testID="model-catalog-debug" numberOfLines={1} ellipsizeMode="tail">
+        <Text variant="meta" tone="muted" testID="model-catalog-debug">
           {`raw ${value?.rawModelCount ?? value?.models.length ?? 0} / parsed ${value?.models.length ?? 0} / entries ${entries.length} / owner ${value?.owner ? 'Y' : 'N'} / allowed ${typeof value?.allowed === 'number' ? value.allowed : '-'} | ${entries.map((e) => `${e.provider}/${e.model}`).join(', ')}`}
         </Text>
         {banner}
@@ -274,6 +274,9 @@ function ModelsView({
         {models.busy ? <LoadingIndicator /> : null}
         <FlatList
           style={{ flex: 1, minHeight: 240 }}
+          onLayout={(e) =>
+            console.info(`list H=${e.nativeEvent.layout.height} W=${e.nativeEvent.layout.width}`)
+          }
           data={entries}
           keyExtractor={(item, index) => JSON.stringify([item.provider, item.model, index])}
           keyboardShouldPersistTaps="handled"
@@ -290,46 +293,51 @@ function ModelsView({
             const usable = item.credential === undefined;
             const required = picker === 'allowed' && sameModel(item, routes.assignmentDefault);
             return (
-              <SettingsGroupItem
-                first={index === 0}
-                last={index === entries.length - 1}
-                on={SHEET_GROUP}
+              <View
+                style={{ height: 64, backgroundColor: index % 2 === 0 ? 'red' : 'blue' }}
+                testID={`model-row-${index}`}
               >
-                <SettingsRow
+                <SettingsGroupItem
+                  first={index === 0}
+                  last={index === entries.length - 1}
                   on={SHEET_GROUP}
-                  title={`[${index}] ${item.modelName}`}
-                  detail={
-                    item.credential === 'missing'
-                      ? t.modelNeedsKey(item.providerName)
-                      : item.credential === 'invalid'
-                        ? t.modelKeyInvalid(item.providerName)
-                        : item.providerName
-                  }
-                  tone={usable ? 'fg' : 'muted'}
-                  selected={selected}
-                  control={selected ? { kind: 'check' } : undefined}
-                  onPress={
-                    models.busy || (!usable && !(picker === 'allowed' && selected)) || required
-                      ? undefined
-                      : () => {
-                          if (picker === 'allowed')
-                            models.run(() => toggleAssignmentModel(client, scope, value, item));
-                          else {
-                            const reasoningEffort = sameModel(item, current)
-                              ? current?.reasoningEffort
-                              : item.defaultEffort;
-                            choose({
-                              provider: item.provider,
-                              model: item.model,
-                              ...(reasoningEffort === undefined || reasoningEffort === ''
-                                ? {}
-                                : { reasoningEffort }),
-                            });
+                >
+                  <SettingsRow
+                    on={SHEET_GROUP}
+                    title={`[${index}] ${item.modelName}`}
+                    detail={
+                      item.credential === 'missing'
+                        ? t.modelNeedsKey(item.providerName)
+                        : item.credential === 'invalid'
+                          ? t.modelKeyInvalid(item.providerName)
+                          : item.providerName
+                    }
+                    tone={usable ? 'fg' : 'muted'}
+                    selected={selected}
+                    control={selected ? { kind: 'check' } : undefined}
+                    onPress={
+                      models.busy || (!usable && !(picker === 'allowed' && selected)) || required
+                        ? undefined
+                        : () => {
+                            if (picker === 'allowed')
+                              models.run(() => toggleAssignmentModel(client, scope, value, item));
+                            else {
+                              const reasoningEffort = sameModel(item, current)
+                                ? current?.reasoningEffort
+                                : item.defaultEffort;
+                              choose({
+                                provider: item.provider,
+                                model: item.model,
+                                ...(reasoningEffort === undefined || reasoningEffort === ''
+                                  ? {}
+                                  : { reasoningEffort }),
+                              });
+                            }
                           }
-                        }
-                  }
-                />
-              </SettingsGroupItem>
+                    }
+                  />
+                </SettingsGroupItem>
+              </View>
             );
           }}
         />
