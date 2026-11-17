@@ -27,7 +27,6 @@ jobs:
       - name: Disable minify for release
         working-directory: apps/mobile
         run: |
-          echo "enableMinifyInReleaseBuilds=false" >> android/gradle.properties
           grep -nE "minifyEnabled|enableMinifyInReleaseBuilds" android/app/build.gradle || true
           sed -i 's/minifyEnabled enableMinifyInReleaseBuilds/minifyEnabled false/' android/app/build.gradle
           sed -i 's/minifyEnabled enableProguardInReleaseBuilds/minifyEnabled false/' android/app/build.gradle
@@ -42,8 +41,8 @@ jobs:
       - name: Debug mirror kotlin modules
         working-directory: apps/mobile
         run: |
-          find node_modules/expo-modules-autolinking -name 'mirrorKotlinInlineModulesCommand.js' | head -3
-          M=$(find node_modules/expo-modules-autolinking -name 'mirrorKotlinInlineModulesCommand.js' | head -1)
+          M=$(node -e "console.log(require.resolve('expo-modules-autolinking/build/commands/mirrorKotlinInlineModulesCommand.js'))" 2>/tmp/mresolve.err || true)
+          echo "M=$M"; cat /tmp/mresolve.err
           echo '--- mirror stdout first 200 bytes ---'; node "$M" 2>/tmp/m.err | head -c 200 | cat -A || true
           echo '--- mirror stderr ---'; head -30 /tmp/m.err
       - name: Warm Gradle distribution
