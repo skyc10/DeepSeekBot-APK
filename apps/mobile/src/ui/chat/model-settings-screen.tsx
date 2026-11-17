@@ -278,6 +278,7 @@ function ModelsView({
         {banner}
         {thinList}
         {models.busy ? <LoadingIndicator /> : null}
+        {picker === 'allowed' ? <SheetNote>{t.modelSettings.allowedHint}</SheetNote> : null}
         {entries.length === 0 ? (
           <SheetNote>{t.modelSettings.noResults}</SheetNote>
         ) : (
