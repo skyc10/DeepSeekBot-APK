@@ -5842,7 +5842,8 @@ export function zhTranslate(key: BotHarnessKey | string, params?: Record<string,
 }
 
 export const en = {
-  'environment.settings.legacyScope': 'Host controls use This Host. Device preferences stay on this device.',
+  'environment.settings.legacyScope':
+    'Host controls use This Host. Device preferences stay on this device.',
   'environment.settings.moreHost': 'More settings',
   'remoteHosts.settings.title': 'Settings for {name}',
   'approval.effect.changes.none': 'Read only',
