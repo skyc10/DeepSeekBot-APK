@@ -39,6 +39,13 @@ jobs:
           npx expo-modules-autolinking resolve --platform android --json > /tmp/auto.json 2>/tmp/auto.err || true
           echo '--- stdout first 200 bytes ---'; head -c 200 /tmp/auto.json | cat -A
           echo '--- stderr ---'; head -50 /tmp/auto.err
+      - name: Debug mirror kotlin modules
+        working-directory: apps/mobile
+        run: |
+          find node_modules/expo-modules-autolinking -name 'mirrorKotlinInlineModulesCommand.js' | head -3
+          M=$(find node_modules/expo-modules-autolinking -name 'mirrorKotlinInlineModulesCommand.js' | head -1)
+          echo '--- mirror stdout first 200 bytes ---'; node "$M" 2>/tmp/m.err | head -c 200 | cat -A || true
+          echo '--- mirror stderr ---'; head -30 /tmp/m.err
       - name: Warm Gradle distribution
         working-directory: apps/mobile
         run: cd android && ./gradlew --version
