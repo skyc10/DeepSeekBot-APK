@@ -267,7 +267,7 @@ function ModelsView({
           onChangeText={setQuery}
         />
         <Text variant="meta" tone="muted" testID="model-catalog-debug">
-          {`raw ${value?.rawModelCount ?? value?.models.length ?? 0} / parsed ${value?.models.length ?? 0} / owner ${value?.owner ? 'Y' : 'N'} / allowed ${typeof value?.allowed === 'number' ? value.allowed : '-'}`}
+          {`raw ${value?.rawModelCount ?? value?.models.length ?? 0} / parsed ${value?.models.length ?? 0} / entries ${entries.length} / owner ${value?.owner ? 'Y' : 'N'} / allowed ${typeof value?.allowed === 'number' ? value.allowed : '-'} | ${entries.map((e) => `${e.provider}/${e.model}`).join(', ')}`}
         </Text>
         {banner}
         {thinList}
@@ -275,7 +275,7 @@ function ModelsView({
         <FlatList
           style={{ flex: 1 }}
           data={entries}
-          keyExtractor={(item) => JSON.stringify([item.provider, item.model])}
+          keyExtractor={(item, index) => JSON.stringify([item.provider, item.model, index])}
           keyboardShouldPersistTaps="handled"
           keyboardDismissMode="on-drag"
           ListHeaderComponent={

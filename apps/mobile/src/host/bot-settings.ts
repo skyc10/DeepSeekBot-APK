@@ -229,6 +229,8 @@ export async function loadBotModel(
   ]);
   const models = record(catalog)?.['models'];
   if (!Array.isArray(models)) throw new HostAnswerInvalid('modelCatalog returned no models.');
+  const rawModels = record(catalog)?.['models'];
+  const raw = Array.isArray(rawModels) ? rawModels.length : 0;
   const current = record(state);
   const saved = plan(current?.['plan']);
   const repair = record(current?.['repair']);
@@ -243,7 +245,7 @@ export async function loadBotModel(
     models: some(models, catalogEntry),
     ...(fallback === undefined ? {} : { fallback }),
     presets: some(record(presets)?.['presets'], preset),
-    rawModelCount: models.length,
+    rawModelCount: raw,
     owner: owner === true,
     allowed: typeof allowed === 'number' ? allowed : owner === true ? models.length : 0,
   };
