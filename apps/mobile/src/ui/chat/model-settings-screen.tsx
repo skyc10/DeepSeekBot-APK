@@ -266,14 +266,14 @@ function ModelsView({
           placeholder={t.modelSettings.search}
           onChangeText={setQuery}
         />
-        <Text variant="meta" tone="muted" testID="model-catalog-debug">
+        <Text variant="meta" tone="muted" testID="model-catalog-debug" numberOfLines={1} ellipsizeMode="tail">
           {`raw ${value?.rawModelCount ?? value?.models.length ?? 0} / parsed ${value?.models.length ?? 0} / entries ${entries.length} / owner ${value?.owner ? 'Y' : 'N'} / allowed ${typeof value?.allowed === 'number' ? value.allowed : '-'} | ${entries.map((e) => `${e.provider}/${e.model}`).join(', ')}`}
         </Text>
         {banner}
         {thinList}
         {models.busy ? <LoadingIndicator /> : null}
         <FlatList
-          style={{ flex: 1 }}
+          style={{ flex: 1, minHeight: 240 }}
           data={entries}
           keyExtractor={(item, index) => JSON.stringify([item.provider, item.model, index])}
           keyboardShouldPersistTaps="handled"
@@ -297,7 +297,7 @@ function ModelsView({
               >
                 <SettingsRow
                   on={SHEET_GROUP}
-                  title={item.modelName}
+                  title={`[${index}] ${item.modelName}`}
                   detail={
                     item.credential === 'missing'
                       ? t.modelNeedsKey(item.providerName)
