@@ -3851,7 +3851,7 @@ function buildBridgeMethods(
                 )
                 .map(({ credential: _credential, ...route }) => route),
               owner: false,
-              allowed: allowed.routes.length,
+              allowed: allowed.all ? models.length : allowed.routes.length,
             },
           };
         }
