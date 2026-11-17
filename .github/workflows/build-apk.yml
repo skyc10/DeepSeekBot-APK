@@ -38,13 +38,9 @@ jobs:
           npx expo-modules-autolinking resolve --platform android --json > /tmp/auto.json 2>/tmp/auto.err || true
           echo '--- stdout first 200 bytes ---'; head -c 200 /tmp/auto.json | cat -A
           echo '--- stderr ---'; head -50 /tmp/auto.err
-      - name: Debug mirror kotlin modules
-        working-directory: apps/mobile
-        run: |
-          M=$(node -e "console.log(require.resolve('expo-modules-autolinking/build/commands/mirrorKotlinInlineModulesCommand.js'))" 2>/tmp/mresolve.err || true)
-          echo "M=$M"; cat /tmp/mresolve.err
-          echo '--- mirror stdout first 200 bytes ---'; node "$M" 2>/tmp/m.err | head -c 200 | cat -A || true
-          echo '--- mirror stderr ---'; head -30 /tmp/m.err
+      - name: Show watched-directories arg
+        working-directory: apps/mobile/android
+        run: ./gradlew :expo:generateInlineModules --info 2>&1 | grep -iE "watched-directories|mirror-kotlin|Command" | head -50
       - name: Warm Gradle distribution
         working-directory: apps/mobile
         run: cd android && ./gradlew --version
