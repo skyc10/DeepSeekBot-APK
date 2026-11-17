@@ -77,7 +77,7 @@ function removePath(root: Record<string, unknown>, path: readonly string[]): voi
   for (let index = 0; index < path.length - 1; index += 1) {
     const key = path[index];
     if (key === undefined) return;
-    const next = cursor?.[key];
+    const next: unknown = cursor?.[key];
     cursor = isRecord(next) ? next : undefined;
     if (cursor === undefined) return;
   }

@@ -455,7 +455,7 @@ export type MuxClientFrame =
       type: 'open';
       streamId: string;
       endpoint: string;
-      payload: { args: Record<string, unknown> };
+      payload: Record<string, unknown>;
     }
   | { type: 'cancel'; streamId: string };
 
