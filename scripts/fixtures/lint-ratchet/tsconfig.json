@@ -1,4 +1,0 @@
-{
-  "compilerOptions": { "strict": true, "target": "ES2023", "module": "ESNext", "noEmit": true },
-  "include": ["*.ts"]
-}
