@@ -24,8 +24,19 @@ jobs:
         run: pnpm install
       - name: Prebuild Android
         run: npx expo prebuild --platform android --clean
+      - name: Harden Gradle heap
+        working-directory: apps/mobile
+        run: |
+          echo "org.gradle.jvmargs=-Xmx3072m -XX:MaxMetaspaceSize=512m" >> android/gradle.properties
+      - name: Disable minify for release
+        working-directory: apps/mobile
+        run: |
+          grep -nE "minifyEnabled|enableProguardInReleaseBuilds" android/app/build.gradle || true
+          sed -i 's/minifyEnabled enableProguardInReleaseBuilds/minifyEnabled false/' android/app/build.gradle
+          sed -i 's/minifyEnabled true/minifyEnabled false/' android/app/build.gradle
+          grep -nE "minifyEnabled" android/app/build.gradle
       - name: Build APK (release)
-        run: cd android && ./gradlew assembleRelease -PreactNativeArchitectures=arm64-v8a -x lint
+        run: cd android && ./gradlew assembleRelease -PreactNativeArchitectures=arm64-v8a -x lint --no-daemon
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
