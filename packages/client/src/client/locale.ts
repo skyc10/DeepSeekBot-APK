@@ -4,6 +4,9 @@ import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots';
 export const LOCALE_NS = 'botharness';
 
 export const zh = {
+  'environment.settings.legacyScope': '主机选项只作用于本机 Host；设备偏好只保存在当前设备。',
+  'environment.settings.moreHost': '更多设置',
+  'remoteHosts.settings.title': '{name} 的设置',
   'approval.effect.changes.none': '只读',
   'approval.effect.changes.reversible': '可撤销更改',
   'approval.effect.changes.irreversible': '不可撤销',
@@ -5839,6 +5842,9 @@ export function zhTranslate(key: BotHarnessKey | string, params?: Record<string,
 }
 
 export const en = {
+  'environment.settings.legacyScope': 'Host controls use This Host. Device preferences stay on this device.',
+  'environment.settings.moreHost': 'More settings',
+  'remoteHosts.settings.title': 'Settings for {name}',
   'approval.effect.changes.none': 'Read only',
   'approval.effect.changes.reversible': 'Reversible changes',
   'approval.effect.changes.irreversible': 'Irreversible',

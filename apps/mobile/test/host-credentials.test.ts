@@ -1,12 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { MethodRefused } from '../src/host/client';
+import type { HostClient } from '../src/host/host-settings';
 import {
   describeCredentials,
   setCredential,
   unsetCredential,
   validCredentialRef,
-  type HostClient,
 } from '../src/host/host-credentials';
 
 function harness(result: unknown = undefined) {
