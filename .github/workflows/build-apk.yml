@@ -33,6 +33,12 @@ jobs:
           sed -i 's/minifyEnabled enableProguardInReleaseBuilds/minifyEnabled false/' android/app/build.gradle
           sed -i 's/minifyEnabled true/minifyEnabled false/' android/app/build.gradle
           grep -nE "minifyEnabled" android/app/build.gradle
+      - name: Debug autolinking stdout
+        working-directory: apps/mobile
+        run: |
+          npx expo-modules-autolinking resolve --platform android --json > /tmp/auto.json 2>/tmp/auto.err || true
+          echo '--- stdout first 200 bytes ---'; head -c 200 /tmp/auto.json | cat -A
+          echo '--- stderr ---'; head -50 /tmp/auto.err
       - name: Warm Gradle distribution
         working-directory: apps/mobile
         run: cd android && ./gradlew --version
