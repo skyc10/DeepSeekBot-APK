@@ -1258,6 +1258,8 @@ export class BotharnessBridgeService extends TypertRemoteService {
     models: ModelCatalogEntry[];
     default?: ModelRoute;
     defaultRevision?: number;
+    owner?: boolean;
+    allowed?: number;
   }> {
     return unwrapAsync(this.methods.modelCatalog({}));
   }

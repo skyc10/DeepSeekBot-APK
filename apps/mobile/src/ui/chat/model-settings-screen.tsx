@@ -267,11 +267,7 @@ function ModelsView({
           onChangeText={setQuery}
         />
         <Text variant="meta" tone="muted" testID="model-catalog-debug">
-          {t.modelSettings.catalogDebug(
-            value.models.length,
-            modelSourceText(lastSource),
-            models.error ?? '',
-          )}
+          {`raw ${value?.rawModelCount ?? value?.models.length ?? 0} / parsed ${value?.models.length ?? 0} / owner ${value?.owner ? 'Y' : 'N'} / allowed ${typeof value?.allowed === 'number' ? value.allowed : '-'}`}
         </Text>
         {banner}
         {thinList}
